@@ -126,9 +126,11 @@ export async function buildTrainsMessage(data: RaidTimerResponse): Promise<Train
   const container = new ContainerBuilder().setAccentColor(COLOR_TRAIN)
 
   if (rows.length === 0) {
-    container.addTextDisplayComponents((text) =>
-      text.setContent('## Raid trains\nNo upcoming raid bosses in the timer response.'),
-    )
+    const emptyText =
+      data.bosses.length > 0
+        ? '## Raid trains\nNo active raid trains right now — next spawns may be further out than the timer window.'
+        : '## Raid trains\nNo upcoming raid bosses in the timer response.'
+    container.addTextDisplayComponents((text) => text.setContent(emptyText))
     return { components: [container], flags: TRAINS_MESSAGE_FLAGS }
   }
 

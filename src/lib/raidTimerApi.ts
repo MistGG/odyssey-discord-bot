@@ -107,20 +107,21 @@ export function isBossReady(boss: RaidBossEntry): boolean {
   return boss.status === 'ready'
 }
 
-/** Boss was killed this cycle — respawning with the next window far beyond the train gap. */
+/** Boss was killed this cycle — respawning with the next window near the full respawn cycle. */
 export function isBossSlain(boss: RaidBossEntry, serverOffsetMs: number): boolean {
   if (boss.status === 'alive' || boss.status === 'ready') return false
   const until = msUntilSpawn(boss, serverOffsetMs)
-  // Upcoming train spawns are within minutes; a kill resets to the full respawn cycle.
-  const slainThresholdMs = Math.max(BOSS_TRAIN_WINDOW_MS * 3, 20 * 60_000)
-  return until > slainThresholdMs
+  const cycleMs = Math.max(boss.respawn_sec, 60) * 1000
+  // After a kill the timer resets to ~full respawn_sec; upcoming spawns are much sooner.
+  return until > cycleMs * 0.85
 }
 
 export function isBossSlainSnapshot(boss: RaidBossAlertSnapshot, serverOffsetMs: number): boolean {
   if (boss.status === 'alive' || boss.status === 'ready') return false
   const until = Math.max(0, boss.nextSpawnUtcMs - serverNowMs(serverOffsetMs))
-  const slainThresholdMs = Math.max(BOSS_TRAIN_WINDOW_MS * 3, 20 * 60_000)
-  return until > slainThresholdMs
+  // Snapshots lack respawn_sec; use a generous cycle floor (typical raid bosses ≈ 3h).
+  const cycleMs = 3 * 60 * 60 * 1000
+  return until > cycleMs * 0.85
 }
 
 export function bossStatusLabel(boss: RaidBossEntry, serverOffsetMs: number): string {
