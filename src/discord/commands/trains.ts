@@ -3,6 +3,7 @@ import { fetchRaidTimer } from '../../lib/raidTimerApi.js'
 import { buildTrainsMessage } from '../trainsView.js'
 
 const LIVE_REFRESH_MS = 30_000
+const ACTIVE_TRAIN_REFRESH_MS = 10_000
 const RENDER_TIMEOUT_MS = 20_000
 
 const liveSessions = new Map<string, AbortController>()
@@ -49,12 +50,13 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
 
 async function renderTrainsMessage() {
   const data = await fetchRaidTimer()
-  return buildTrainsMessage(data)
+  const payload = await buildTrainsMessage(data)
+  return payload
 }
 
 async function editTrainsMessage(
   message: Message,
-  payload: Awaited<ReturnType<typeof buildTrainsMessage>>,
+  payload: Awaited<ReturnType<typeof renderTrainsMessage>>,
 ): Promise<void> {
   await message.edit({
     components: payload.components,
@@ -64,7 +66,7 @@ async function editTrainsMessage(
 
 async function replyWithTrainsPayload(
   interaction: ChatInputCommandInteraction,
-  payload: Awaited<ReturnType<typeof buildTrainsMessage>>,
+  payload: Awaited<ReturnType<typeof renderTrainsMessage>>,
 ): Promise<Message> {
   await interaction.editReply({
     components: payload.components,
@@ -86,18 +88,20 @@ async function runLiveRefresh(
   signal: AbortSignal,
 ): Promise<void> {
   while (!signal.aborted) {
-    try {
-      await sleep(LIVE_REFRESH_MS, signal)
-    } catch {
-      return
-    }
-
+    let refreshMs = LIVE_REFRESH_MS
     try {
       const payload = await withTimeout(renderTrainsMessage(), RENDER_TIMEOUT_MS, 'Train refresh')
       await editTrainsMessage(message, payload)
+      refreshMs = payload.activeTrain ? ACTIVE_TRAIN_REFRESH_MS : LIVE_REFRESH_MS
     } catch (err) {
       if (signal.aborted || isUnknownMessageError(err)) return
       console.error('[trains] live refresh failed:', err)
+    }
+
+    try {
+      await sleep(refreshMs, signal)
+    } catch {
+      return
     }
   }
 }
@@ -108,7 +112,7 @@ export const trainsCommand = new SlashCommandBuilder()
   .addBooleanOption((opt) =>
     opt
       .setName('live')
-      .setDescription('Keep refreshing every 30s until you run /trains again (default: on)'),
+      .setDescription('Keep refreshing (10s during active trains, 30s otherwise; default: on)'),
   )
 
 export async function handleTrainsCommand(interaction: ChatInputCommandInteraction): Promise<void> {

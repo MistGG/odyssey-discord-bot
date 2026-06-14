@@ -42,7 +42,7 @@ export function buildTrainPingsEmbed(): EmbedBuilder {
       },
       {
         name: 'Pause Pings',
-        value: 'Mute train alerts — opt back in anytime.',
+        value: 'Mute train alerts. Opt back in anytime.',
         inline: true,
       },
     )
@@ -116,7 +116,7 @@ async function handlePingToggle(
   if (subscribe) {
     if (hasRole) {
       await interaction.reply({
-        content: `You already have **${role.name}** — train pings are on.`,
+        content: `You already have **${role.name}**. Train pings are on.`,
         ephemeral: true,
       })
       return

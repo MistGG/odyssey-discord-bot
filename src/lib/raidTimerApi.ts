@@ -156,6 +156,9 @@ export function toAlertSnapshots(bosses: RaidBossEntry[]): RaidBossAlertSnapshot
 /** Consecutive spawns within this gap form one train (e.g. Suka → Crowmon → Goatmon). */
 export const BOSS_TRAIN_WINDOW_MS = 5 * 60_000
 
+/** How far ahead to show the next train after the current one ends. */
+export const TRAIN_LOOKAHEAD_MS = 5 * 60 * 60_000
+
 /** Spawn groups tighter than this are simultaneous spawns, not a train. */
 export const BOSS_TRAIN_MIN_SPAN_MS = 10_000
 
@@ -280,19 +283,59 @@ export function pickVisibleBossTrains(
   count: number,
   serverOffsetMs = 0,
 ): BossTimerVisibleTrain[] {
+  return pickDisplayBossTrains(bosses, serverOffsetMs, TRAIN_LOOKAHEAD_MS)
+}
+
+function isTrainInProgress(train: RaidBossEntry[], serverOffsetMs: number): boolean {
+  if (train.some((b) => isBossAlive(b) || isBossReady(b))) return true
+  const slain = train.filter((b) => isBossSlain(b, serverOffsetMs)).length
+  return slain > 0 && slain < train.length
+}
+
+export function hasActiveRaidTrain(bosses: RaidBossEntry[], serverOffsetMs = 0): boolean {
   const nowMs = serverNowMs(serverOffsetMs)
-  const visible = pickVisibleBosses(bosses, count, nowMs)
-  const fullTrainByBossId = new Map<string, RaidBossEntry[]>()
   for (const train of groupBossesIntoTrains(bosses, nowMs)) {
-    if (train.length < 2) continue
-    for (const boss of train) fullTrainByBossId.set(boss.monster_id, train)
+    if (isTrainInProgress(train, serverOffsetMs)) return true
+  }
+  return false
+}
+
+/** Active train first; otherwise upcoming trains within `horizonMs` (default 5h). */
+export function pickDisplayBossTrains(
+  bosses: RaidBossEntry[],
+  serverOffsetMs = 0,
+  horizonMs = TRAIN_LOOKAHEAD_MS,
+): BossTimerVisibleTrain[] {
+  const nowMs = serverNowMs(serverOffsetMs)
+  const grouped = groupBossesIntoTrains(bosses, nowMs)
+  const fullTrainByBossId = new Map<string, RaidBossEntry[]>()
+  for (const train of grouped) {
+    if (train.length >= 2) {
+      for (const boss of train) fullTrainByBossId.set(boss.monster_id, train)
+    }
   }
 
-  return groupBossesIntoTrains(visible, nowMs).map((train) => {
-    const fullTrain = fullTrainByBossId.get(train[0]!.monster_id)
-    return {
-      bosses: train,
-      totalSpawnCount: fullTrain?.length ?? train.length,
-    }
+  const toVisibleTrain = (train: RaidBossEntry[]): BossTimerVisibleTrain => ({
+    bosses: train,
+    totalSpawnCount: fullTrainByBossId.get(train[0]!.monster_id)?.length ?? train.length,
   })
+
+  const active = grouped.filter((train) => isTrainInProgress(train, serverOffsetMs))
+  if (active.length > 0) {
+    return active.map(toVisibleTrain)
+  }
+
+  const upcoming = grouped
+    .filter((train) => {
+      if (train.every((b) => isBossSlain(b, serverOffsetMs))) return false
+      const leadMs = Math.min(...train.map((b) => bossTrainSpawnMs(b, nowMs))) - nowMs
+      return leadMs <= horizonMs
+    })
+    .sort((a, b) => {
+      const af = Math.min(...a.map((x) => bossTrainSpawnMs(x, nowMs)))
+      const bf = Math.min(...b.map((x) => bossTrainSpawnMs(x, nowMs)))
+      return af - bf
+    })
+
+  return upcoming.map(toVisibleTrain)
 }

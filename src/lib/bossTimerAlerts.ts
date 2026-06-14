@@ -42,7 +42,7 @@ export function relaxedTrainCopy(
   const lines = train.map((boss) => {
     const place = boss.mapName?.trim() || 'world boss location'
     const time = timeFmt.format(new Date(boss.nextSpawnUtcMs))
-    return `• ${boss.monsterName} — ${place} (${time})`
+    return `• ${boss.monsterName} · ${place} (${time})`
   })
 
   return {

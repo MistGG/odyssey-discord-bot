@@ -5,11 +5,12 @@ import {
 } from 'discord.js'
 import {
   bossTrainSpawnMs,
+  hasActiveRaidTrain,
   isBossAlive,
   isBossReady,
   isBossSlain,
   nextSpawnUtcMs,
-  pickVisibleBossTrains,
+  pickDisplayBossTrains,
   serverNowMs,
   type RaidBossEntry,
   type RaidTimerResponse,
@@ -63,12 +64,11 @@ type BossRow = {
 
 function flattenVisibleBossRows(data: RaidTimerResponse): BossRow[] {
   const nowMs = serverNowMs(data.serverOffsetMs)
-  const visibleTrains = pickVisibleBossTrains(data.bosses, 15, data.serverOffsetMs)
+  const visibleTrains = pickDisplayBossTrains(data.bosses, data.serverOffsetMs)
   const rows: BossRow[] = []
 
   for (const { bosses, totalSpawnCount } of visibleTrains) {
     const ordered = [...bosses].sort((a, b) => bossTrainSpawnMs(a, nowMs) - bossTrainSpawnMs(b, nowMs))
-    if (ordered.every((boss) => isBossSlain(boss, data.serverOffsetMs))) continue
     for (let i = 0; i < ordered.length; i++) {
       rows.push({
         boss: ordered[i]!,
@@ -111,7 +111,7 @@ function buildHeaderText(data: RaidTimerResponse, rows: BossRow[], truncated: bo
     lines.push(`_Showing first ${MAX_BOSSES} of ${rows.length} bosses._`)
   }
 
-  lines.push('', '_Odyssey Calc · spawn times update live · refreshes every 30s_')
+  lines.push('', '_Odyssey Calc · spawn times update live · 10s during active trains · 30s otherwise_')
 
   return lines.join('\n')
 }
@@ -119,19 +119,21 @@ function buildHeaderText(data: RaidTimerResponse, rows: BossRow[], truncated: bo
 export type TrainsMessagePayload = {
   components: ContainerBuilder[]
   flags: typeof TRAINS_MESSAGE_FLAGS
+  activeTrain: boolean
 }
 
 export async function buildTrainsMessage(data: RaidTimerResponse): Promise<TrainsMessagePayload> {
   const rows = flattenVisibleBossRows(data)
+  const activeTrain = hasActiveRaidTrain(data.bosses, data.serverOffsetMs)
   const container = new ContainerBuilder().setAccentColor(COLOR_TRAIN)
 
   if (rows.length === 0) {
     const emptyText =
       data.bosses.length > 0
-        ? '## Raid trains\nNo active raid trains right now — next spawns may be further out than the timer window.'
+        ? '## Raid trains\nNo active raid trains in the next 5 hours.'
         : '## Raid trains\nNo upcoming raid bosses in the timer response.'
     container.addTextDisplayComponents((text) => text.setContent(emptyText))
-    return { components: [container], flags: TRAINS_MESSAGE_FLAGS }
+    return { components: [container], flags: TRAINS_MESSAGE_FLAGS, activeTrain }
   }
 
   const truncated = rows.length > MAX_BOSSES
@@ -166,7 +168,7 @@ export async function buildTrainsMessage(data: RaidTimerResponse): Promise<Train
     })
   }
 
-  return { components: [container], flags: TRAINS_MESSAGE_FLAGS }
+  return { components: [container], flags: TRAINS_MESSAGE_FLAGS, activeTrain }
 }
 
 /** @deprecated Use buildTrainsMessage for /trains replies. */

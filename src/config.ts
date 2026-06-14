@@ -15,6 +15,7 @@ export type EnvConfig = {
   defaultPatchNotesChannelId: string | null
   alertLeadMinutes: number[]
   pollMs: number
+  activeTrainPollMs: number
   patchNotesPollMs: number
   guildConfigPath: string
 }
@@ -40,6 +41,9 @@ export function loadEnvConfig(): EnvConfig {
   const patchNotesPollRaw = Number(process.env.PATCH_NOTES_POLL_MS)
   const patchNotesPollMs =
     Number.isFinite(patchNotesPollRaw) && patchNotesPollRaw >= 60_000 ? patchNotesPollRaw : 300_000
+  const activeTrainPollRaw = Number(process.env.ACTIVE_TRAIN_POLL_MS)
+  const activeTrainPollMs =
+    Number.isFinite(activeTrainPollRaw) && activeTrainPollRaw >= 5_000 ? activeTrainPollRaw : 10_000
   const guildConfigPath = join(rootDir, 'data', 'guild-config.json')
 
   mkdirSync(dirname(guildConfigPath), { recursive: true })
@@ -53,6 +57,7 @@ export function loadEnvConfig(): EnvConfig {
     defaultPatchNotesChannelId: process.env.DISCORD_PATCH_NOTES_CHANNEL_ID?.trim() || null,
     alertLeadMinutes: parseLeadMinutes(process.env.ALERT_LEAD_MINUTES),
     pollMs,
+    activeTrainPollMs,
     patchNotesPollMs,
     guildConfigPath,
   }

@@ -48,7 +48,7 @@ export async function handlePatchNotesCommand(
 
     await channel.send({ embeds: [buildPatchNoteEmbed(note, { test: true })] })
     await interaction.editReply({
-      content: `Posted the latest patch note to <#${cfg.patchNotesChannelId}> (test preview — does not affect auto-post tracking).`,
+      content: `Posted the latest patch note to <#${cfg.patchNotesChannelId}> (test preview; does not affect auto-post tracking).`,
     })
   } catch (err) {
     console.error('[patch-notes] test failed:', err)

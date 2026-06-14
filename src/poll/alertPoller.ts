@@ -2,6 +2,7 @@ import type { Client, TextChannel } from 'discord.js'
 import { BossAlertEngine, type BossAlertCandidate } from '../lib/bossTimerAlerts.js'
 import {
   fetchRaidTimer,
+  hasActiveRaidTrain,
   isBossSlain,
   nextSpawnUtcMs,
   toAlertSnapshots,
@@ -24,10 +25,12 @@ function isUnknownMessageError(err: unknown): boolean {
 export class AlertPoller {
   private readonly engines = new Map<string, BossAlertEngine>()
   private readonly trainAlerts = new TrainAlertTracker()
-  private raidTimer: ReturnType<typeof setInterval> | null = null
+  private raidPollTimeout: ReturnType<typeof setTimeout> | null = null
   private patchNotesTimer: ReturnType<typeof setInterval> | null = null
   private pollingRaid = false
   private pollingPatchNotes = false
+  private stopped = false
+  private lastRaidData: { bosses: RaidBossEntry[]; serverOffsetMs: number } | null = null
 
   constructor(
     private readonly client: Client,
@@ -36,10 +39,10 @@ export class AlertPoller {
   ) {}
 
   start(): void {
-    if (this.raidTimer) return
-    void this.pollRaidAlerts()
+    if (this.patchNotesTimer) return
+    this.stopped = false
     void this.pollPatchNotes()
-    this.raidTimer = setInterval(() => void this.pollRaidAlerts(), this.env.pollMs)
+    void this.runRaidPollCycle()
     this.patchNotesTimer = setInterval(
       () => void this.pollPatchNotes(),
       this.env.patchNotesPollMs,
@@ -47,13 +50,48 @@ export class AlertPoller {
   }
 
   stop(): void {
-    if (this.raidTimer) {
-      clearInterval(this.raidTimer)
-      this.raidTimer = null
+    this.stopped = true
+    if (this.raidPollTimeout) {
+      clearTimeout(this.raidPollTimeout)
+      this.raidPollTimeout = null
     }
     if (this.patchNotesTimer) {
       clearInterval(this.patchNotesTimer)
       this.patchNotesTimer = null
+    }
+  }
+
+  private scheduleNextRaidPoll(delayMs: number): void {
+    if (this.stopped) return
+    if (this.raidPollTimeout) clearTimeout(this.raidPollTimeout)
+    this.raidPollTimeout = setTimeout(() => void this.runRaidPollCycle(), delayMs)
+  }
+
+  private hasTrackedTrainAlerts(): boolean {
+    for (const guildId of this.guildsToNotify()) {
+      if (this.trainAlerts.list(guildId).length > 0) return true
+    }
+    return false
+  }
+
+  private shouldPollRaidFast(bosses: RaidBossEntry[], serverOffsetMs: number): boolean {
+    if (hasActiveRaidTrain(bosses, serverOffsetMs)) return true
+    return this.hasTrackedTrainAlerts()
+  }
+
+  private async runRaidPollCycle(): Promise<void> {
+    let nextDelay = this.env.pollMs
+    try {
+      await this.pollRaidAlerts()
+      if (this.lastRaidData) {
+        nextDelay = this.shouldPollRaidFast(this.lastRaidData.bosses, this.lastRaidData.serverOffsetMs)
+          ? this.env.activeTrainPollMs
+          : this.env.pollMs
+      }
+    } catch {
+      nextDelay = this.env.pollMs
+    } finally {
+      this.scheduleNextRaidPoll(nextDelay)
     }
   }
 
@@ -91,6 +129,7 @@ export class AlertPoller {
     this.pollingRaid = true
     try {
       const data = await fetchRaidTimer()
+      this.lastRaidData = { bosses: data.bosses, serverOffsetMs: data.serverOffsetMs }
       const snapshots = toAlertSnapshots(data.bosses)
 
       for (const guildId of this.guildsToNotify()) {
