@@ -17,6 +17,8 @@ const USER_AGENT =
 const FETCH_HEADERS = {
   Accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
   'User-Agent': USER_AGENT,
+  'Cache-Control': 'no-cache, no-store, must-revalidate',
+  Pragma: 'no-cache',
 } as const
 
 const FETCH_TIMEOUT_MS = 20_000
@@ -27,7 +29,12 @@ async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Respon
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
   try {
-    return await fetch(url, { ...init, signal: controller.signal, headers: FETCH_HEADERS })
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+      headers: { ...FETCH_HEADERS, ...init?.headers },
+      cache: 'no-store',
+    } as RequestInit)
   } finally {
     clearTimeout(timer)
   }
@@ -41,7 +48,8 @@ async function fetchSitemapDocUrls(): Promise<string[]> {
   if (sitemapInFlight) return sitemapInFlight
 
   sitemapInFlight = (async () => {
-    const res = await fetchWithTimeout(SITEMAP_URL)
+    const cacheBustUrl = `${SITEMAP_URL}&_=${Date.now()}`
+    const res = await fetchWithTimeout(cacheBustUrl)
     if (!res.ok) {
       throw new Error(`Patch notes sitemap returned ${res.status}`)
     }

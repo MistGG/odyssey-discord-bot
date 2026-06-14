@@ -24,8 +24,10 @@ function isUnknownMessageError(err: unknown): boolean {
 export class AlertPoller {
   private readonly engines = new Map<string, BossAlertEngine>()
   private readonly trainAlerts = new TrainAlertTracker()
-  private timer: ReturnType<typeof setInterval> | null = null
-  private polling = false
+  private raidTimer: ReturnType<typeof setInterval> | null = null
+  private patchNotesTimer: ReturnType<typeof setInterval> | null = null
+  private pollingRaid = false
+  private pollingPatchNotes = false
 
   constructor(
     private readonly client: Client,
@@ -34,15 +36,24 @@ export class AlertPoller {
   ) {}
 
   start(): void {
-    if (this.timer) return
-    void this.pollOnce()
-    this.timer = setInterval(() => void this.pollOnce(), this.env.pollMs)
+    if (this.raidTimer) return
+    void this.pollRaidAlerts()
+    void this.pollPatchNotes()
+    this.raidTimer = setInterval(() => void this.pollRaidAlerts(), this.env.pollMs)
+    this.patchNotesTimer = setInterval(
+      () => void this.pollPatchNotes(),
+      this.env.patchNotesPollMs,
+    )
   }
 
   stop(): void {
-    if (this.timer) {
-      clearInterval(this.timer)
-      this.timer = null
+    if (this.raidTimer) {
+      clearInterval(this.raidTimer)
+      this.raidTimer = null
+    }
+    if (this.patchNotesTimer) {
+      clearInterval(this.patchNotesTimer)
+      this.patchNotesTimer = null
     }
   }
 
@@ -75,17 +86,9 @@ export class AlertPoller {
     return [...ids]
   }
 
-  private async pollOnce(): Promise<void> {
-    if (this.polling) return
-    this.polling = true
-    try {
-      await Promise.all([this.pollRaidAlerts(), this.pollPatchNotes()])
-    } finally {
-      this.polling = false
-    }
-  }
-
   private async pollRaidAlerts(): Promise<void> {
+    if (this.pollingRaid) return
+    this.pollingRaid = true
     try {
       const data = await fetchRaidTimer()
       const snapshots = toAlertSnapshots(data.bosses)
@@ -98,14 +101,18 @@ export class AlertPoller {
       }
     } catch (err) {
       console.error('[poll] raid timer fetch failed:', err)
+    } finally {
+      this.pollingRaid = false
     }
   }
 
   private async pollPatchNotes(): Promise<void> {
-    const guildIds = this.guildsForPatchNotes()
-    if (guildIds.length === 0) return
-
+    if (this.pollingPatchNotes) return
+    this.pollingPatchNotes = true
     try {
+      const guildIds = this.guildsForPatchNotes()
+      if (guildIds.length === 0) return
+
       const latest = await fetchLatestPatchNoteMeta()
       if (!latest) return
 
@@ -133,6 +140,8 @@ export class AlertPoller {
       }
     } catch (err) {
       console.error('[poll] patch notes fetch failed:', err)
+    } finally {
+      this.pollingPatchNotes = false
     }
   }
 
