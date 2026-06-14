@@ -1,6 +1,12 @@
 import type { Client, TextChannel } from 'discord.js'
-import { BossAlertEngine } from '../lib/bossTimerAlerts.js'
-import { fetchRaidTimer, toAlertSnapshots } from '../lib/raidTimerApi.js'
+import { BossAlertEngine, type BossAlertCandidate } from '../lib/bossTimerAlerts.js'
+import {
+  fetchRaidTimer,
+  isBossSlain,
+  nextSpawnUtcMs,
+  toAlertSnapshots,
+  type RaidBossEntry,
+} from '../lib/raidTimerApi.js'
 import {
   fetchLatestPatchNoteMeta,
   fetchPatchNoteDetail,
@@ -9,9 +15,15 @@ import type { EnvConfig } from '../config.js'
 import type { GuildConfigManager } from '../guildConfig.js'
 import { buildTrainAlertEmbed, rolePingContent } from '../discord/embeds.js'
 import { buildPatchNoteEmbed } from '../discord/patchNotesEmbed.js'
+import { TrainAlertTracker } from './trainAlertTracker.js'
+
+function isUnknownMessageError(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && (err as { code: number }).code === 10008
+}
 
 export class AlertPoller {
   private readonly engines = new Map<string, BossAlertEngine>()
+  private readonly trainAlerts = new TrainAlertTracker()
   private timer: ReturnType<typeof setInterval> | null = null
   private polling = false
 
@@ -82,6 +94,7 @@ export class AlertPoller {
         const engine = this.engineFor(guildId)
         engine.setSnapshots(snapshots)
         await this.notifyGuild(guildId, engine)
+        await this.refreshTrainAlertMessages(guildId, data.bosses, data.serverOffsetMs)
       }
     } catch (err) {
       console.error('[poll] raid timer fetch failed:', err)
@@ -123,6 +136,101 @@ export class AlertPoller {
     }
   }
 
+  private resolveLiveTrain(
+    rosterNames: string[],
+    bosses: RaidBossEntry[],
+  ): BossAlertCandidate['train'] {
+    const train: BossAlertCandidate['train'] = []
+    for (const name of rosterNames) {
+      const boss = bosses.find((b) => b.monster_name === name)
+      if (!boss) continue
+      train.push({
+        monsterName: boss.monster_name,
+        mapName: boss.map_name,
+        status: boss.status,
+        nextSpawnUtcMs: nextSpawnUtcMs(boss),
+      })
+    }
+    return train
+  }
+
+  private slainNamesForRoster(
+    rosterNames: string[],
+    bosses: RaidBossEntry[],
+    serverOffsetMs: number,
+  ): Set<string> {
+    const slain = new Set<string>()
+    for (const name of rosterNames) {
+      const boss = bosses.find((b) => b.monster_name === name)
+      if (boss && isBossSlain(boss, serverOffsetMs)) slain.add(name)
+    }
+    return slain
+  }
+
+  private isTrainCleared(
+    rosterNames: string[],
+    bosses: RaidBossEntry[],
+    serverOffsetMs: number,
+  ): boolean {
+    if (rosterNames.length === 0) return true
+    return rosterNames.every((name) => {
+      const boss = bosses.find((b) => b.monster_name === name)
+      return boss != null && isBossSlain(boss, serverOffsetMs)
+    })
+  }
+
+  private async refreshTrainAlertMessages(
+    guildId: string,
+    bosses: RaidBossEntry[],
+    serverOffsetMs: number,
+  ): Promise<void> {
+    const tracked = this.trainAlerts.list(guildId)
+    if (tracked.length === 0) return
+
+    for (const alert of [...tracked]) {
+      try {
+        const channel = await this.resolveChannel(guildId, alert.channelId)
+        if (!channel) {
+          this.trainAlerts.remove(guildId, alert.messageId)
+          continue
+        }
+
+        const message = await channel.messages.fetch(alert.messageId).catch(() => null)
+        if (!message) {
+          this.trainAlerts.remove(guildId, alert.messageId)
+          continue
+        }
+
+        if (this.isTrainCleared(alert.rosterNames, bosses, serverOffsetMs)) {
+          await message.delete().catch(() => {})
+          this.trainAlerts.remove(guildId, alert.messageId)
+          continue
+        }
+
+        const liveTrain = this.resolveLiveTrain(alert.rosterNames, bosses)
+        if (liveTrain.length === 0) continue
+
+        const slainNames = this.slainNamesForRoster(alert.rosterNames, bosses, serverOffsetMs)
+        const candidate: BossAlertCandidate = {
+          train: liveTrain,
+          leadMin: alert.leadMin,
+          notifyKey: alert.notifyKey,
+          copy: alert.copy,
+        }
+
+        await message.edit({
+          embeds: [buildTrainAlertEmbed(candidate, { slainNames, liveTrain })],
+        })
+      } catch (err) {
+        if (isUnknownMessageError(err)) {
+          this.trainAlerts.remove(guildId, alert.messageId)
+        } else {
+          console.error(`[poll] failed to refresh train alert ${alert.messageId}:`, err)
+        }
+      }
+    }
+  }
+
   private async notifyGuild(guildId: string, engine: BossAlertEngine): Promise<void> {
     const cfg = this.guildConfig.get(guildId)
     if (!cfg.alertChannelId) return
@@ -135,11 +243,12 @@ export class AlertPoller {
 
     for (const candidate of candidates) {
       try {
-        await channel.send({
+        const sent = await channel.send({
           content: rolePingContent(cfg.pingRoleId),
           embeds: [buildTrainAlertEmbed(candidate)],
           allowedMentions: cfg.pingRoleId ? { roles: [cfg.pingRoleId] } : { parse: [] },
         })
+        this.trainAlerts.track(guildId, TrainAlertTracker.fromCandidate(channel.id, sent.id, candidate))
       } catch (err) {
         console.error(`[poll] failed to send alert in guild ${guildId}:`, err)
       }

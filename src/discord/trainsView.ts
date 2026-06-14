@@ -7,6 +7,7 @@ import {
   bossTrainSpawnMs,
   isBossAlive,
   isBossReady,
+  isBossSlain,
   nextSpawnUtcMs,
   pickVisibleBossTrains,
   serverNowMs,
@@ -41,11 +42,17 @@ function bossPortraitUrl(boss: RaidBossEntry, monster: MonsterDetail | null): st
   return url || undefined
 }
 
-function spawnLine(boss: RaidBossEntry): string {
+function spawnLine(boss: RaidBossEntry, serverOffsetMs: number): string {
+  if (isBossSlain(boss, serverOffsetMs)) return '💀 **Defeated**'
   if (isBossAlive(boss)) return '🟢 **Alive now**'
   if (isBossReady(boss)) return '🟡 **Ready**'
   const spawnMs = nextSpawnUtcMs(boss)
   return `⏱ ${discordTimestamp(spawnMs, 'R')} · ${discordTimestamp(spawnMs, 'f')}`
+}
+
+function bossNameLine(boss: RaidBossEntry, serverOffsetMs: number): string {
+  if (isBossSlain(boss, serverOffsetMs)) return `~~**${boss.monster_name}**~~`
+  return `**${boss.monster_name}**`
 }
 
 type BossRow = {
@@ -61,6 +68,7 @@ function flattenVisibleBossRows(data: RaidTimerResponse): BossRow[] {
 
   for (const { bosses, totalSpawnCount } of visibleTrains) {
     const ordered = [...bosses].sort((a, b) => bossTrainSpawnMs(a, nowMs) - bossTrainSpawnMs(b, nowMs))
+    if (ordered.every((boss) => isBossSlain(boss, data.serverOffsetMs))) continue
     for (let i = 0; i < ordered.length; i++) {
       rows.push({
         boss: ordered[i]!,
@@ -143,8 +151,9 @@ export async function buildTrainsMessage(data: RaidTimerResponse): Promise<Train
 
     container.addSectionComponents((section) => {
       section.addTextDisplayComponents(
-        (text) => text.setContent(`**${boss.monster_name}**\n📍 ${map}`),
-        (text) => text.setContent(spawnLine(boss)),
+        (text) =>
+          text.setContent(`${bossNameLine(boss, data.serverOffsetMs)}\n📍 ${map}`),
+        (text) => text.setContent(spawnLine(boss, data.serverOffsetMs)),
       )
       if (portrait) {
         section.setThumbnailAccessory((thumb) =>

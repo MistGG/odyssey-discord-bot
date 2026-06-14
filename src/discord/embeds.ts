@@ -8,15 +8,47 @@ function discordTimestamp(ms: number, style: 'R' | 'f' = 'R'): string {
   return `<t:${Math.floor(ms / 1000)}:${style}>`
 }
 
-function bossFieldLine(boss: RaidBossAlertSnapshot): string {
-  const place = boss.mapName?.trim() || 'Unknown map'
-  if (boss.status === 'alive') return `🟢 **${boss.monsterName}** · ${place} · **Alive**`
-  if (boss.status === 'ready') return `🟡 **${boss.monsterName}** · ${place} · **Ready**`
-  return `**${boss.monsterName}** · ${place} · ${discordTimestamp(boss.nextSpawnUtcMs, 'R')}`
+function formatBossName(name: string, slain: boolean): string {
+  return slain ? `~~${name}~~` : `**${name}**`
 }
 
-export function buildTrainAlertEmbed(candidate: BossAlertCandidate): EmbedBuilder {
+function bossFieldLine(boss: RaidBossAlertSnapshot, slain: boolean): string {
+  const place = boss.mapName?.trim() || 'Unknown map'
+  const name = formatBossName(boss.monsterName, slain)
+  if (slain) return `💀 ${name} · ${place} · **Defeated**`
+  if (boss.status === 'alive') return `🟢 ${name} · ${place} · **Alive**`
+  if (boss.status === 'ready') return `🟡 ${name} · ${place} · **Ready**`
+  return `${name} · ${place} · ${discordTimestamp(boss.nextSpawnUtcMs, 'R')}`
+}
+
+function bossFieldValue(boss: RaidBossAlertSnapshot, slain: boolean): string {
+  if (slain) return 'Defeated'
+  if (boss.status === 'alive') return 'Alive now'
+  if (boss.status === 'ready') return 'Ready to spawn'
+  return discordTimestamp(boss.nextSpawnUtcMs, 'f')
+}
+
+function singleBossDescription(boss: RaidBossAlertSnapshot, slain: boolean, leadMin: number): string {
+  const place = boss.mapName?.trim() || 'world boss location'
+  const name = formatBossName(boss.monsterName, slain)
+  if (slain) return `${name} · ${place} · **Defeated**`
+  if (boss.status === 'alive') return `${name} · ${place} · **Alive now**`
+  if (boss.status === 'ready') return `${name} · ${place} · **Ready**`
+  return `About ${leadMin} min until the next window. ${name} · ${place} · ${discordTimestamp(boss.nextSpawnUtcMs, 'R')}`
+}
+
+export type TrainAlertEmbedOptions = {
+  slainNames?: ReadonlySet<string>
+  liveTrain?: RaidBossAlertSnapshot[]
+}
+
+export function buildTrainAlertEmbed(
+  candidate: BossAlertCandidate,
+  options?: TrainAlertEmbedOptions,
+): EmbedBuilder {
   const { train, leadMin, copy } = candidate
+  const slainNames = options?.slainNames ?? new Set<string>()
+  const displayTrain = options?.liveTrain ?? train
   const title = `${copy.title} — ~${leadMin} min`
 
   const embed = new EmbedBuilder()
@@ -25,11 +57,17 @@ export function buildTrainAlertEmbed(candidate: BossAlertCandidate): EmbedBuilde
     .setFooter({ text: 'Odyssey Calc · live' })
     .setTimestamp()
 
-  if (train.length === 1) {
-    embed.setDescription(copy.body)
+  if (displayTrain.length === 1) {
+    const boss = displayTrain[0]!
+    embed.setDescription(singleBossDescription(boss, slainNames.has(boss.monsterName), leadMin))
   } else {
-    for (const boss of train) {
-      embed.addFields({ name: bossFieldLine(boss), value: discordTimestamp(boss.nextSpawnUtcMs, 'f'), inline: false })
+    for (const boss of displayTrain) {
+      const slain = slainNames.has(boss.monsterName)
+      embed.addFields({
+        name: bossFieldLine(boss, slain),
+        value: bossFieldValue(boss, slain),
+        inline: false,
+      })
     }
   }
 
