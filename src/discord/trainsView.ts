@@ -44,16 +44,16 @@ function bossPortraitUrl(boss: RaidBossEntry, monster: MonsterDetail | null): st
   return url || undefined
 }
 
-function spawnLine(boss: RaidBossEntry, serverOffsetMs: number): string {
-  if (isBossSlain(boss, serverOffsetMs)) return '💀 **Defeated**'
+function spawnLine(boss: RaidBossEntry, serverOffsetMs: number, allBosses: RaidBossEntry[]): string {
+  if (isBossSlain(boss, serverOffsetMs, allBosses)) return '💀 **Defeated**'
   if (isBossAlive(boss)) return '🟢 **Alive now**'
   if (isBossReady(boss)) return '🟡 **Ready**'
   const spawnMs = nextSpawnUtcMs(boss)
   return `⏱ ${discordTimestamp(spawnMs, 'R')} · ${discordTimestamp(spawnMs, 'f')}`
 }
 
-function bossNameLine(boss: RaidBossEntry, serverOffsetMs: number): string {
-  if (isBossSlain(boss, serverOffsetMs)) return `~~**${boss.monster_name}**~~`
+function bossNameLine(boss: RaidBossEntry, serverOffsetMs: number, allBosses: RaidBossEntry[]): string {
+  if (isBossSlain(boss, serverOffsetMs, allBosses)) return `~~**${boss.monster_name}**~~`
   return `**${boss.monster_name}**`
 }
 
@@ -179,8 +179,8 @@ export async function buildTrainsMessage(
     container.addSectionComponents((section) => {
       section.addTextDisplayComponents(
         (text) =>
-          text.setContent(`${bossNameLine(boss, data.serverOffsetMs)}\n📍 ${map}`),
-        (text) => text.setContent(spawnLine(boss, data.serverOffsetMs)),
+          text.setContent(`${bossNameLine(boss, data.serverOffsetMs, data.bosses)}\n📍 ${map}`),
+        (text) => text.setContent(spawnLine(boss, data.serverOffsetMs, data.bosses)),
       )
       if (portrait) {
         section.setThumbnailAccessory((thumb) =>
