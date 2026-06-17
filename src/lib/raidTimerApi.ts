@@ -159,6 +159,9 @@ export const BOSS_TRAIN_WINDOW_MS = 5 * 60_000
 /** How far ahead to show the next train after the current one ends. */
 export const TRAIN_LOOKAHEAD_MS = 5 * 60 * 60_000
 
+/** Typical world raid respawn cycle (3h). Used for stable alert dedupe per train. */
+export const RAID_TRAIN_CYCLE_MS = 3 * 60 * 60_000
+
 /** Spawn groups tighter than this are simultaneous spawns, not a train. */
 export const BOSS_TRAIN_MIN_SPAN_MS = 10_000
 
@@ -240,16 +243,83 @@ export function groupAlertSnapshotsIntoTrains(
 }
 
 /**
- * Group respawning bosses for spawn reminders — any spawns within `windowMs` share one toast/chime.
- * Unlike {@link groupAlertSnapshotsIntoTrains}, does not split simultaneous spawns (<10s span); that
- * split is UI-only so clustered train starts still get a single alert.
+ * Group respawning bosses for spawn reminders — one unified train per cycle.
+ * Includes alive/ready bosses (e.g. Neptunemon) in the roster for embed copy.
  */
+export function buildUnifiedAlertTrain(
+  bosses: RaidBossAlertSnapshot[],
+  nowMs = Date.now(),
+): RaidBossAlertSnapshot[] {
+  const inCycle = bosses.filter(
+    (b) => b.status === 'alive' || b.status === 'ready' || b.status === 'respawning',
+  )
+  if (inCycle.length === 0) return []
+
+  return [...inCycle].sort(
+    (a, b) => alertTrainSpawnMs(a, nowMs) - alertTrainSpawnMs(b, nowMs),
+  )
+}
+
 export function groupAlertSnapshotsForNotify(
   bosses: RaidBossAlertSnapshot[],
   nowMs = Date.now(),
-  windowMs = BOSS_TRAIN_WINDOW_MS,
 ): RaidBossAlertSnapshot[][] {
-  return groupByNextSpawnWindow(bosses, (b) => alertTrainSpawnMs(b, nowMs), windowMs)
+  const train = buildUnifiedAlertTrain(bosses, nowMs)
+  const hasUpcoming = train.some((b) => b.status === 'respawning')
+  if (!hasUpcoming) return []
+  return [train]
+}
+
+function mergeSingletonBossesIntoMainTrain(
+  trains: RaidBossEntry[][],
+  nowMs: number,
+): RaidBossEntry[][] {
+  if (trains.length <= 1) return trains
+
+  let mainIdx = 0
+  for (let i = 1; i < trains.length; i++) {
+    if (trains[i]!.length > trains[mainIdx]!.length) mainIdx = i
+  }
+
+  const main = [...trains[mainIdx]!]
+  const rest: RaidBossEntry[][] = []
+
+  for (let i = 0; i < trains.length; i++) {
+    if (i === mainIdx) continue
+    if (trains[i]!.length === 1) {
+      main.push(trains[i]![0]!)
+    } else {
+      rest.push(trains[i]!)
+    }
+  }
+
+  main.sort((a, b) => bossTrainSpawnMs(a, nowMs) - bossTrainSpawnMs(b, nowMs))
+  return [main, ...rest]
+}
+
+function prependAliveNeptunemonToTrain(
+  trains: BossTimerVisibleTrain[],
+  bosses: RaidBossEntry[],
+  nowMs: number,
+): BossTimerVisibleTrain[] {
+  const neptune = bosses.find((b) => b.monster_name === 'Neptunemon')
+  if (!neptune || (!isBossAlive(neptune) && !isBossReady(neptune))) return trains
+
+  const targetIdx = trains.findIndex((t) => t.bosses.length > 1)
+  const idx = targetIdx >= 0 ? targetIdx : 0
+  const target = trains[idx]
+  if (!target || target.bosses.some((b) => b.monster_id === neptune.monster_id)) return trains
+
+  return trains.map((t, i) => {
+    if (i !== idx) return t
+    const merged = [neptune, ...t.bosses].sort(
+      (a, b) => bossTrainSpawnMs(a, nowMs) - bossTrainSpawnMs(b, nowMs),
+    )
+    return {
+      bosses: merged,
+      totalSpawnCount: Math.max(t.totalSpawnCount, merged.length),
+    }
+  })
 }
 
 export function sortBossesForVisibility(bosses: RaidBossEntry[], nowMs: number): RaidBossEntry[] {
@@ -307,7 +377,7 @@ export function pickDisplayBossTrains(
   horizonMs = TRAIN_LOOKAHEAD_MS,
 ): BossTimerVisibleTrain[] {
   const nowMs = serverNowMs(serverOffsetMs)
-  const grouped = groupBossesIntoTrains(bosses, nowMs)
+  const grouped = mergeSingletonBossesIntoMainTrain(groupBossesIntoTrains(bosses, nowMs), nowMs)
   const fullTrainByBossId = new Map<string, RaidBossEntry[]>()
   for (const train of grouped) {
     if (train.length >= 2) {
@@ -322,7 +392,7 @@ export function pickDisplayBossTrains(
 
   const active = grouped.filter((train) => isTrainInProgress(train, serverOffsetMs))
   if (active.length > 0) {
-    return active.map(toVisibleTrain)
+    return prependAliveNeptunemonToTrain(active.map(toVisibleTrain), bosses, nowMs)
   }
 
   const upcoming = grouped
@@ -337,5 +407,5 @@ export function pickDisplayBossTrains(
       return af - bf
     })
 
-  return upcoming.map(toVisibleTrain)
+  return prependAliveNeptunemonToTrain(upcoming.map(toVisibleTrain), bosses, nowMs)
 }

@@ -1,5 +1,6 @@
 import {
   BOSS_TRAIN_WINDOW_MS,
+  buildUnifiedAlertTrain,
   groupAlertSnapshotsForNotify,
   type RaidBossAlertSnapshot,
 } from './raidTimerApi.js'
@@ -7,15 +8,10 @@ import {
 /** Must match poll interval order of magnitude for cold-start detection. */
 export const BOSS_TIMER_ALERT_TICK_MS = 15_000
 
-/** Stable key for one train spawn cycle — minute bucket absorbs raid-timer API jitter. */
-export function trainNotifyKey(train: RaidBossAlertSnapshot[], leadMin: number): string {
-  const first = train[0]!
-  const spawnBucket = Math.floor(first.nextSpawnUtcMs / 60_000)
-  const roster = train
-    .map((b) => b.monsterName)
-    .sort()
-    .join('|')
-  return `${spawnBucket}:${roster}:${leadMin}`
+/** Stable key for one train spawn cycle — anchored to first spawn, not roster. */
+export function trainNotifyKey(anchorSpawnUtcMs: number, leadMin: number): string {
+  const spawnBucket = Math.floor(anchorSpawnUtcMs / 60_000)
+  return `${spawnBucket}:train:${leadMin}`
 }
 
 export function relaxedBossCopy(
@@ -29,21 +25,25 @@ export function relaxedBossCopy(
   }
 }
 
+function formatBossLine(boss: RaidBossAlertSnapshot): string {
+  const place = boss.mapName?.trim() || 'world boss location'
+  const timeFmt = new Intl.DateTimeFormat(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+  if (boss.status === 'alive') return `• ${boss.monsterName} · ${place} (alive)`
+  if (boss.status === 'ready') return `• ${boss.monsterName} · ${place} (ready)`
+  const time = timeFmt.format(new Date(boss.nextSpawnUtcMs))
+  return `• ${boss.monsterName} · ${place} (${time})`
+}
+
 export function relaxedTrainCopy(
   train: RaidBossAlertSnapshot[],
   minsApprox: number,
 ): { title: string; body: string } {
   if (train.length === 1) return relaxedBossCopy(train[0]!, minsApprox)
 
-  const timeFmt = new Intl.DateTimeFormat(undefined, {
-    hour: 'numeric',
-    minute: '2-digit',
-  })
-  const lines = train.map((boss) => {
-    const place = boss.mapName?.trim() || 'world boss location'
-    const time = timeFmt.format(new Date(boss.nextSpawnUtcMs))
-    return `• ${boss.monsterName} · ${place} (${time})`
-  })
+  const lines = train.map((boss) => formatBossLine(boss))
 
   return {
     title: `Boss train (${train.length} spawns)`,
@@ -65,11 +65,12 @@ type LeadState = {
 
 /**
  * Pre-spawn alerts for bosses in `respawning` state (raid timer API).
- * Trains share one alert when the first boss crosses into a lead window (~N min before spawn).
+ * One ping per lead time for the whole train (stable cycle anchor).
  */
 export class BossAlertEngine {
   private activeBossAlerts: RaidBossAlertSnapshot[] = []
   private readonly leadStates = new Map<number, LeadState>()
+  private trainCycleAnchorMs: number | null = null
 
   setSnapshots(snapshots: RaidBossAlertSnapshot[]): void {
     this.activeBossAlerts = snapshots
@@ -84,63 +85,89 @@ export class BossAlertEngine {
     return state
   }
 
+  private resetCycleIfComplete(train: RaidBossAlertSnapshot[]): void {
+    const respawning = train.filter((b) => b.status === 'respawning')
+    if (respawning.length > 0) return
+
+    this.trainCycleAnchorMs = null
+    for (const state of this.leadStates.values()) {
+      state.notifiedKeys.clear()
+      state.lastFirstRemainingMs.clear()
+    }
+  }
+
+  private syncCycleAnchor(train: RaidBossAlertSnapshot[]): number | null {
+    const respawning = train.filter((b) => b.status === 'respawning')
+    if (respawning.length === 0) return null
+
+    if (this.trainCycleAnchorMs == null) {
+      this.trainCycleAnchorMs = Math.min(...respawning.map((b) => b.nextSpawnUtcMs))
+    }
+
+    return this.trainCycleAnchorMs
+  }
+
   tick(leadMinutes: number[], now = Date.now()): BossAlertCandidate[] {
     const normalized = leadMinutes
       .map((m) => Math.min(120, Math.max(1, Math.round(m))))
       .filter((m, i, arr) => arr.indexOf(m) === i)
       .sort((a, b) => b - a)
 
-    const respawning = this.activeBossAlerts.filter((boss) => boss.status === 'respawning')
-    const trains = groupAlertSnapshotsForNotify(respawning, now)
+    const trains = groupAlertSnapshotsForNotify(this.activeBossAlerts, now)
+    if (trains.length === 0) {
+      this.resetCycleIfComplete(buildUnifiedAlertTrain(this.activeBossAlerts, now))
+      return []
+    }
+
+    const train = trains[0]!
+    this.resetCycleIfComplete(train)
+
+    const anchorMs = this.syncCycleAnchor(train)
+    if (anchorMs == null) return []
+
+    const firstRemaining = anchorMs - now
     const candidates: BossAlertCandidate[] = []
 
     for (const leadMin of normalized) {
       const leadMs = leadMin * 60_000
       const state = this.leadState(leadMin)
+      const notifyKey = trainNotifyKey(anchorMs, leadMin)
+      const prevRemaining = state.lastFirstRemainingMs.get(notifyKey)
 
-      for (const train of trains) {
-        const first = train[0]!
-        const firstRemaining = first.nextSpawnUtcMs - now
-        const notifyKey = trainNotifyKey(train, leadMin)
-        const prevRemaining = state.lastFirstRemainingMs.get(notifyKey)
-
-        if (firstRemaining <= 0) {
-          state.notifiedKeys.delete(notifyKey)
-          state.lastFirstRemainingMs.delete(notifyKey)
-          continue
-        }
-
-        if (firstRemaining > leadMs) {
-          state.notifiedKeys.delete(notifyKey)
-          state.lastFirstRemainingMs.set(notifyKey, firstRemaining)
-          continue
-        }
-
-        state.lastFirstRemainingMs.set(notifyKey, firstRemaining)
-
-        const crossedIntoLead =
-          prevRemaining != null && prevRemaining > leadMs && firstRemaining <= leadMs
-        const coldStartNearLead =
-          prevRemaining == null &&
-          firstRemaining <= leadMs &&
-          firstRemaining >= leadMs - BOSS_TIMER_ALERT_TICK_MS * 2
-
-        if (!crossedIntoLead && !coldStartNearLead) {
-          continue
-        }
-
-        if (state.notifiedKeys.has(notifyKey)) {
-          continue
-        }
-        state.notifiedKeys.add(notifyKey)
-
-        candidates.push({
-          train,
-          leadMin,
-          notifyKey,
-          copy: relaxedTrainCopy(train, leadMin),
-        })
+      if (firstRemaining <= 0) {
+        continue
       }
+
+      if (firstRemaining > leadMs) {
+        state.notifiedKeys.delete(notifyKey)
+        state.lastFirstRemainingMs.set(notifyKey, firstRemaining)
+        continue
+      }
+
+      state.lastFirstRemainingMs.set(notifyKey, firstRemaining)
+
+      const crossedIntoLead =
+        prevRemaining != null && prevRemaining > leadMs && firstRemaining <= leadMs
+      const coldStartNearLead =
+        prevRemaining == null &&
+        firstRemaining <= leadMs &&
+        firstRemaining >= leadMs - BOSS_TIMER_ALERT_TICK_MS * 2
+
+      if (!crossedIntoLead && !coldStartNearLead) {
+        continue
+      }
+
+      if (state.notifiedKeys.has(notifyKey)) {
+        continue
+      }
+      state.notifiedKeys.add(notifyKey)
+
+      candidates.push({
+        train,
+        leadMin,
+        notifyKey,
+        copy: relaxedTrainCopy(train, leadMin),
+      })
     }
 
     return candidates
