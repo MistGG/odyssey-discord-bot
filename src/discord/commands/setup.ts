@@ -36,7 +36,7 @@ export const setupCommand = new SlashCommandBuilder()
   .addSubcommand((sub) =>
     sub
       .setName('lead-times')
-      .setDescription('Minutes before spawn to alert (e.g. 5 and 2)')
+      .setDescription('Minutes before train start to alert (default: 5)')
       .addIntegerOption((opt) =>
         opt.setName('first').setDescription('First lead time in minutes').setRequired(true).setMinValue(1).setMaxValue(120),
       )

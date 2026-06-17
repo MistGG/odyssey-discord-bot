@@ -22,7 +22,7 @@ Discord bot for **raid boss spawn alerts**, **boss trains**, and **role pings** 
 | `DISCORD_DEV_GUILD_ID` | no | Guild ID for instant dev command registration |
 | `DISCORD_ALERT_CHANNEL_ID` | no | Default alert channel (until `/setup` is run) |
 | `DISCORD_PING_ROLE_ID` | no | Default ping role |
-| `ALERT_LEAD_MINUTES` | no | Comma-separated lead times (default `5,2`) |
+| `ALERT_LEAD_MINUTES` | no | Comma-separated lead times (default `5`) |
 | `DISCORD_PATCH_NOTES_CHANNEL_ID` | no | Default patch notes channel |
 | `RAID_POLL_MS` | no | Poll interval ms (default `60000`, min `15000`) |
 
@@ -56,7 +56,7 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=18
 |---------|-------------|
 | `/setup alert-channel #channel` | Where train alerts are posted |
 | `/setup ping-role @role` | Role to ping (omit role to clear) |
-| `/setup lead-times 5 2` | Minutes before spawn to alert (up to 3 values) |
+| `/setup lead-times 5` | Minutes before spawn to alert (up to 3 values) |
 | `/setup patch-notes-channel #channel` | Where new patch notes are posted |
 | `/setup show` | Show current guild settings |
 | `/trains` | On-demand snapshot of upcoming trains |

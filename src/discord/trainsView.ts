@@ -12,6 +12,7 @@ import {
   nextSpawnUtcMs,
   pickDisplayBossTrains,
   serverNowMs,
+  TRAINS_LIVE_LOOKAHEAD_MS,
   type RaidBossEntry,
   type RaidTimerResponse,
 } from '../lib/raidTimerApi.js'
@@ -62,9 +63,9 @@ type BossRow = {
   isFirstInTrain: boolean
 }
 
-function flattenVisibleBossRows(data: RaidTimerResponse): BossRow[] {
+function flattenVisibleBossRows(data: RaidTimerResponse, horizonMs?: number): BossRow[] {
   const nowMs = serverNowMs(data.serverOffsetMs)
-  const visibleTrains = pickDisplayBossTrains(data.bosses, data.serverOffsetMs)
+  const visibleTrains = pickDisplayBossTrains(data.bosses, data.serverOffsetMs, horizonMs)
   const rows: BossRow[] = []
 
   for (const { bosses, totalSpawnCount } of visibleTrains) {
@@ -81,7 +82,12 @@ function flattenVisibleBossRows(data: RaidTimerResponse): BossRow[] {
   return rows
 }
 
-function buildHeaderText(data: RaidTimerResponse, rows: BossRow[], truncated: boolean): string {
+function buildHeaderText(
+  data: RaidTimerResponse,
+  rows: BossRow[],
+  truncated: boolean,
+  updatedAtMs?: number,
+): string {
   const shown = rows.slice(0, MAX_BOSSES)
   const alive = data.bosses.filter((b) => isBossAlive(b)).length
   const ready = data.bosses.filter((b) => isBossReady(b)).length
@@ -111,7 +117,12 @@ function buildHeaderText(data: RaidTimerResponse, rows: BossRow[], truncated: bo
     lines.push(`_Showing first ${MAX_BOSSES} of ${rows.length} bosses._`)
   }
 
-  lines.push('', '_Odyssey Calc · spawn times update live · 10s during active trains · 30s otherwise_')
+  lines.push(
+    '',
+    updatedAtMs
+      ? `_Odyssey Calc · updated ${discordTimestamp(updatedAtMs, 'R')} · 10s during active trains · 30s otherwise_`
+      : '_Odyssey Calc · spawn times update live · 10s during active trains · 30s otherwise_',
+  )
 
   return lines.join('\n')
 }
@@ -122,8 +133,18 @@ export type TrainsMessagePayload = {
   activeTrain: boolean
 }
 
-export async function buildTrainsMessage(data: RaidTimerResponse): Promise<TrainsMessagePayload> {
-  const rows = flattenVisibleBossRows(data)
+export type TrainsMessageOptions = {
+  /** Wider horizon for live /trains refresh (default: alert lookahead). */
+  horizonMs?: number
+  updatedAtMs?: number
+}
+
+export async function buildTrainsMessage(
+  data: RaidTimerResponse,
+  options?: TrainsMessageOptions,
+): Promise<TrainsMessagePayload> {
+  const horizonMs = options?.horizonMs
+  const rows = flattenVisibleBossRows(data, horizonMs)
   const activeTrain = hasActiveRaidTrain(data.bosses, data.serverOffsetMs)
   const container = new ContainerBuilder().setAccentColor(COLOR_TRAIN)
 
@@ -143,7 +164,9 @@ export async function buildTrainsMessage(data: RaidTimerResponse): Promise<Train
     ? await fetchMonsterDetailsForBosses(shownRows.map((r) => r.boss.monster_id))
     : new Map<string, MonsterDetail>()
 
-  container.addTextDisplayComponents((text) => text.setContent(buildHeaderText(data, rows, truncated)))
+  container.addTextDisplayComponents((text) =>
+    text.setContent(buildHeaderText(data, rows, truncated, options?.updatedAtMs)),
+  )
   container.addSeparatorComponents((sep) =>
     sep.setDivider(true).setSpacing(SeparatorSpacingSize.Small),
   )

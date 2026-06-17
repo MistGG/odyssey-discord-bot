@@ -21,12 +21,12 @@ export type EnvConfig = {
 }
 
 function parseLeadMinutes(raw: string | undefined): number[] {
-  if (!raw?.trim()) return [5, 2]
+  if (!raw?.trim()) return [5]
   const parsed = raw
     .split(',')
     .map((s) => Math.round(Number(s.trim())))
     .filter((n) => Number.isFinite(n) && n >= 1 && n <= 120)
-  return parsed.length > 0 ? [...new Set(parsed)].sort((a, b) => b - a) : [5, 2]
+  return parsed.length > 0 ? [...new Set(parsed)].sort((a, b) => b - a) : [5]
 }
 
 function requireEnv(name: string): string {

@@ -156,8 +156,11 @@ export function toAlertSnapshots(bosses: RaidBossEntry[]): RaidBossAlertSnapshot
 /** Consecutive spawns within this gap form one train (e.g. Suka → Crowmon → Goatmon). */
 export const BOSS_TRAIN_WINDOW_MS = 5 * 60_000
 
-/** How far ahead to show the next train after the current one ends. */
+/** How far ahead to show the next train after the current one ends (alerts / snapshot). */
 export const TRAIN_LOOKAHEAD_MS = 5 * 60 * 60_000
+
+/** Live /trains board: show the next train if within 24h. */
+export const TRAINS_LIVE_LOOKAHEAD_MS = 24 * 60 * 60_000
 
 /** Typical world raid respawn cycle (3h). Used for stable alert dedupe per train. */
 export const RAID_TRAIN_CYCLE_MS = 3 * 60 * 60_000
