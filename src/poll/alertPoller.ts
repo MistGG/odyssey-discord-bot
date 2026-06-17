@@ -210,7 +210,7 @@ export class AlertPoller {
     const slain = new Set<string>()
     for (const name of rosterNames) {
       const boss = bosses.find((b) => b.monster_name === name)
-      if (boss && isBossSlain(boss, serverOffsetMs)) slain.add(name)
+      if (boss && isBossSlain(boss, serverOffsetMs, bosses)) slain.add(name)
     }
     return slain
   }
@@ -223,7 +223,7 @@ export class AlertPoller {
     if (rosterNames.length === 0) return true
     return rosterNames.every((name) => {
       const boss = bosses.find((b) => b.monster_name === name)
-      return boss != null && isBossSlain(boss, serverOffsetMs)
+      return boss != null && isBossSlain(boss, serverOffsetMs, bosses)
     })
   }
 
@@ -284,12 +284,21 @@ export class AlertPoller {
     if (!cfg.alertChannelId) return
 
     const candidates = engine.tick(cfg.leadMinutes)
-    if (candidates.length === 0) return
+    const toSend =
+      candidates.length > 0
+        ? candidates
+        : this.trainAlerts.list(guildId).length === 0
+          ? (() => {
+              const active = engine.tickActiveTrain()
+              return active ? [active] : []
+            })()
+          : []
+    if (toSend.length === 0) return
 
     const channel = await this.resolveChannel(guildId, cfg.alertChannelId)
     if (!channel) return
 
-    for (const candidate of candidates) {
+    for (const candidate of toSend) {
       try {
         const sent = await channel.send({
           content: rolePingContent(cfg.pingRoleId),

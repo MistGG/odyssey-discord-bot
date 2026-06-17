@@ -37,6 +37,25 @@ function formatBossLine(boss: RaidBossAlertSnapshot): string {
   return `• ${boss.monsterName} · ${place} (${time})`
 }
 
+export function activeTrainCopy(
+  train: RaidBossAlertSnapshot[],
+): { title: string; body: string } {
+  if (train.length === 1) {
+    const boss = train[0]!
+    const place = boss.mapName?.trim() || 'world boss location'
+    return {
+      title: boss.monsterName,
+      body: `**${boss.monsterName}** is up at ${place}.`,
+    }
+  }
+
+  const lines = train.map((boss) => formatBossLine(boss))
+  return {
+    title: `Boss train (${train.length} spawns)`,
+    body: `Train in progress.\n${lines.join('\n')}`,
+  }
+}
+
 export function relaxedTrainCopy(
   train: RaidBossAlertSnapshot[],
   minsApprox: number,
@@ -49,6 +68,11 @@ export function relaxedTrainCopy(
     title: `Boss train (${train.length} spawns)`,
     body: `About ${minsApprox} min until the train starts.\n${lines.join('\n')}`,
   }
+}
+
+/** Notify key for a train already in progress (bot restart / missed pre-ping). */
+export function activeTrainNotifyKey(anchorSpawnUtcMs: number): string {
+  return `active:${trainNotifyKey(anchorSpawnUtcMs, 0)}`
 }
 
 export type BossAlertCandidate = {
@@ -120,6 +144,9 @@ export class BossAlertEngine {
     }
 
     const train = trains[0]!
+    const trainAlreadyStarted = train.some(
+      (b) => b.status === 'alive' || b.status === 'ready',
+    )
     this.resetCycleIfComplete(train)
 
     const anchorMs = this.syncCycleAnchor(train)
@@ -148,12 +175,13 @@ export class BossAlertEngine {
 
       const crossedIntoLead =
         prevRemaining != null && prevRemaining > leadMs && firstRemaining <= leadMs
-      const coldStartNearLead =
+      const coldStartInLeadWindow =
         prevRemaining == null &&
-        firstRemaining <= leadMs &&
-        firstRemaining >= leadMs - BOSS_TIMER_ALERT_TICK_MS * 2
+        !trainAlreadyStarted &&
+        firstRemaining > 0 &&
+        firstRemaining <= leadMs
 
-      if (!crossedIntoLead && !coldStartNearLead) {
+      if (!crossedIntoLead && !coldStartInLeadWindow) {
         continue
       }
 
@@ -171,6 +199,39 @@ export class BossAlertEngine {
     }
 
     return candidates
+  }
+
+  /** Post once when a train is already active and no pre-spawn ping went out this cycle. */
+  tickActiveTrain(now = Date.now()): BossAlertCandidate | null {
+    const train = buildUnifiedAlertTrain(this.activeBossAlerts, now)
+    if (!train.some((b) => b.status === 'alive' || b.status === 'ready')) {
+      return null
+    }
+
+    const anchorMs =
+      this.trainCycleAnchorMs ?? Math.min(...train.map((b) => b.nextSpawnUtcMs))
+    const notifyKey = activeTrainNotifyKey(anchorMs)
+    const state = this.leadState(0)
+
+    if (state.notifiedKeys.has(notifyKey)) {
+      return null
+    }
+
+    for (const [leadMin, leadState] of this.leadStates) {
+      if (leadMin === 0) continue
+      if (leadState.notifiedKeys.has(trainNotifyKey(anchorMs, leadMin))) {
+        return null
+      }
+    }
+
+    state.notifiedKeys.add(notifyKey)
+
+    return {
+      train,
+      leadMin: 0,
+      notifyKey,
+      copy: activeTrainCopy(train),
+    }
   }
 }
 

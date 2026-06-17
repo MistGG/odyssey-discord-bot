@@ -49,7 +49,8 @@ export function buildTrainAlertEmbed(
   const { train, leadMin, copy } = candidate
   const slainNames = options?.slainNames ?? new Set<string>()
   const displayTrain = options?.liveTrain ?? train
-  const title = `${copy.title} · ~${leadMin} min`
+  const title =
+    leadMin > 0 ? `${copy.title} · ~${leadMin} min` : `${copy.title} · Active now`
 
   const embed = new EmbedBuilder()
     .setColor(EMBED_COLOR)
