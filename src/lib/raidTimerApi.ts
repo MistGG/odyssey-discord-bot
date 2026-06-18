@@ -108,7 +108,7 @@ export function isBossReady(boss: RaidBossEntry): boolean {
 }
 
 /** Max gap from train lead to last boss in the same spawn wave (Neptunemon trails ~22m behind). */
-const TRAIN_WAVE_TAIL_MS = 30 * 60_000
+export const TRAIN_WAVE_TAIL_MS = 30 * 60_000
 
 /** Boss was killed this cycle — respawning with the next window near the full respawn cycle. */
 export function isBossSlain(

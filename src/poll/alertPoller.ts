@@ -7,8 +7,11 @@ import {
   isBossAlive,
   isBossReady,
   isBossSlain,
+  bossTrainSpawnMs,
   nextSpawnUtcMs,
+  serverNowMs,
   toAlertSnapshots,
+  TRAIN_WAVE_TAIL_MS,
   type RaidBossEntry,
 } from '../lib/raidTimerApi.js'
 import {
@@ -159,7 +162,7 @@ export class AlertPoller {
         const engine = this.engineFor(guildId)
         engine.setSnapshots(snapshots)
         await this.refreshTrainAlertMessages(guildId, engine, data.bosses, data.serverOffsetMs)
-        await this.notifyGuild(guildId, engine)
+        await this.notifyGuild(guildId, engine, data.bosses, data.serverOffsetMs)
       }
     } catch (err) {
       console.error('[poll] raid timer fetch failed:', err)
@@ -250,12 +253,20 @@ export class AlertPoller {
     if (rosterBosses.length === 0) return true
     if (rosterBosses.some((b) => isBossAlive(b) || isBossReady(b))) return false
 
-    const slainCount = rosterBosses.filter((b) =>
-      isBossSlain(b, serverOffsetMs, bosses),
-    ).length
-    if (slainCount > 0 && slainCount < rosterBosses.length) return false
+    const nowMs = serverNowMs(serverOffsetMs)
+    const leadMs = Math.min(...rosterBosses.map((b) => bossTrainSpawnMs(b, nowMs)))
 
-    return true
+    // Pre-spawn countdown — keep the embed until the train actually starts.
+    if (leadMs > nowMs) return false
+
+    for (const boss of rosterBosses) {
+      if (isBossSlain(boss, serverOffsetMs, bosses)) continue
+      const spawnMs = bossTrainSpawnMs(boss, nowMs)
+      // Boss still part of this train wave (upcoming or recently spawned).
+      if (spawnMs <= leadMs + TRAIN_WAVE_TAIL_MS) return false
+    }
+
+    return rosterBosses.every((b) => isBossSlain(b, serverOffsetMs, bosses))
   }
 
   private async refreshTrainAlertMessages(
@@ -317,10 +328,17 @@ export class AlertPoller {
     }
   }
 
-  private async notifyGuild(guildId: string, engine: BossAlertEngine): Promise<void> {
+  private async notifyGuild(
+    guildId: string,
+    engine: BossAlertEngine,
+    bosses: RaidBossEntry[],
+    serverOffsetMs: number,
+  ): Promise<void> {
     const cfg = this.guildConfig.get(guildId)
     if (!cfg.alertChannelId) return
     if (this.trainAlerts.list(guildId).length > 0) return
+    // Train already running — only edit the existing embed, never re-ping.
+    if (hasActiveRaidTrain(bosses, serverOffsetMs)) return
 
     const candidates = engine.tick(cfg.leadMinutes)
     if (candidates.length === 0) return

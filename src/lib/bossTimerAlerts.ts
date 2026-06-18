@@ -166,6 +166,11 @@ export class BossAlertEngine {
         continue
       }
 
+      // Never pre-ping once the train has started — embed updates only.
+      if (trainAlreadyStarted) {
+        continue
+      }
+
       if (firstRemaining > leadMs) {
         state.notifiedKeys.delete(notifyKey)
         state.lastFirstRemainingMs.set(notifyKey, firstRemaining)
