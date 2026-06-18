@@ -2,7 +2,10 @@ import type { Client, TextChannel } from 'discord.js'
 import { BossAlertEngine, type BossAlertCandidate } from '../lib/bossTimerAlerts.js'
 import {
   fetchRaidTimer,
+  groupAlertSnapshotsForNotify,
   hasActiveRaidTrain,
+  isBossAlive,
+  isBossReady,
   isBossSlain,
   nextSpawnUtcMs,
   toAlertSnapshots,
@@ -76,7 +79,27 @@ export class AlertPoller {
 
   private shouldPollRaidFast(bosses: RaidBossEntry[], serverOffsetMs: number): boolean {
     if (hasActiveRaidTrain(bosses, serverOffsetMs)) return true
-    return this.hasTrackedTrainAlerts()
+    if (this.hasTrackedTrainAlerts()) return true
+    for (const guildId of this.guildsToNotify()) {
+      const leadMinutes = this.guildConfig.get(guildId).leadMinutes
+      if (this.isWithinLeadWindow(bosses, leadMinutes)) return true
+    }
+    return false
+  }
+
+  private isWithinLeadWindow(bosses: RaidBossEntry[], leadMinutes: number[]): boolean {
+    const snapshots = toAlertSnapshots(bosses)
+    const trains = groupAlertSnapshotsForNotify(snapshots, Date.now())
+    if (trains.length === 0) return false
+
+    const train = trains[0]!
+    const respawning = train.filter((b) => b.status === 'respawning')
+    if (respawning.length === 0) return false
+
+    const anchorMs = Math.min(...respawning.map((b) => b.nextSpawnUtcMs))
+    const maxLeadMs = Math.max(...leadMinutes, 5) * 60_000
+    const remaining = anchorMs - Date.now()
+    return remaining > 0 && remaining <= maxLeadMs + 60_000
   }
 
   private async runRaidPollCycle(): Promise<void> {
@@ -135,8 +158,8 @@ export class AlertPoller {
       for (const guildId of this.guildsToNotify()) {
         const engine = this.engineFor(guildId)
         engine.setSnapshots(snapshots)
+        await this.refreshTrainAlertMessages(guildId, engine, data.bosses, data.serverOffsetMs)
         await this.notifyGuild(guildId, engine)
-        await this.refreshTrainAlertMessages(guildId, data.bosses, data.serverOffsetMs)
       }
     } catch (err) {
       console.error('[poll] raid timer fetch failed:', err)
@@ -220,15 +243,24 @@ export class AlertPoller {
     bosses: RaidBossEntry[],
     serverOffsetMs: number,
   ): boolean {
-    if (rosterNames.length === 0) return true
-    return rosterNames.every((name) => {
-      const boss = bosses.find((b) => b.monster_name === name)
-      return boss != null && isBossSlain(boss, serverOffsetMs, bosses)
-    })
+    const rosterBosses = rosterNames
+      .map((name) => bosses.find((b) => b.monster_name === name))
+      .filter((b): b is RaidBossEntry => b != null)
+
+    if (rosterBosses.length === 0) return true
+    if (rosterBosses.some((b) => isBossAlive(b) || isBossReady(b))) return false
+
+    const slainCount = rosterBosses.filter((b) =>
+      isBossSlain(b, serverOffsetMs, bosses),
+    ).length
+    if (slainCount > 0 && slainCount < rosterBosses.length) return false
+
+    return true
   }
 
   private async refreshTrainAlertMessages(
     guildId: string,
+    engine: BossAlertEngine,
     bosses: RaidBossEntry[],
     serverOffsetMs: number,
   ): Promise<void> {
@@ -252,6 +284,9 @@ export class AlertPoller {
         if (this.isTrainCleared(alert.rosterNames, bosses, serverOffsetMs)) {
           await message.delete().catch(() => {})
           this.trainAlerts.remove(guildId, alert.messageId)
+          if (this.trainAlerts.list(guildId).length === 0) {
+            engine.resetCycle()
+          }
           continue
         }
 
@@ -272,6 +307,9 @@ export class AlertPoller {
       } catch (err) {
         if (isUnknownMessageError(err)) {
           this.trainAlerts.remove(guildId, alert.messageId)
+          if (this.trainAlerts.list(guildId).length === 0) {
+            engine.resetCycle()
+          }
         } else {
           console.error(`[poll] failed to refresh train alert ${alert.messageId}:`, err)
         }
@@ -282,23 +320,15 @@ export class AlertPoller {
   private async notifyGuild(guildId: string, engine: BossAlertEngine): Promise<void> {
     const cfg = this.guildConfig.get(guildId)
     if (!cfg.alertChannelId) return
+    if (this.trainAlerts.list(guildId).length > 0) return
 
     const candidates = engine.tick(cfg.leadMinutes)
-    const toSend =
-      candidates.length > 0
-        ? candidates
-        : this.trainAlerts.list(guildId).length === 0
-          ? (() => {
-              const active = engine.tickActiveTrain()
-              return active ? [active] : []
-            })()
-          : []
-    if (toSend.length === 0) return
+    if (candidates.length === 0) return
 
     const channel = await this.resolveChannel(guildId, cfg.alertChannelId)
     if (!channel) return
 
-    for (const candidate of toSend) {
+    for (const candidate of candidates) {
       try {
         const sent = await channel.send({
           content: rolePingContent(cfg.pingRoleId),
