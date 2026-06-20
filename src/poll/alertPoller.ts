@@ -1,5 +1,5 @@
 import type { Client, TextChannel } from 'discord.js'
-import { BossAlertEngine, type BossAlertCandidate } from '../lib/bossTimerAlerts.js'
+import { BossAlertEngine, trainNotifyKey, type BossAlertCandidate } from '../lib/bossTimerAlerts.js'
 import {
   fetchRaidTimer,
   groupAlertSnapshotsForNotify,
@@ -387,29 +387,65 @@ export class AlertPoller {
     const cfg = this.guildConfig.get(guildId)
     if (!cfg.alertChannelId) return
     if (this.trainAlerts.get(guildId)) return
-    if (hasActiveRaidTrain(bosses, serverOffsetMs)) return
-
-    const candidates = engine.tick(cfg.leadMinutes)
-    if (candidates.length === 0) return
 
     const channel = await this.resolveChannel(guildId, cfg.alertChannelId)
     if (!channel) return
 
-    for (const candidate of candidates) {
-      if (engine.hasNotified(candidate.leadMin, candidate.notifyKey)) continue
+    const leadMin = cfg.leadMinutes[0] ?? 5
 
-      try {
-        const sent = await channel.send({
-          content: rolePingContent(cfg.pingRoleId),
-          embeds: [buildTrainAlertEmbed(candidate)],
-          allowedMentions: cfg.pingRoleId ? { roles: [cfg.pingRoleId] } : { parse: [] },
-        })
-        engine.markNotified(candidate.leadMin, candidate.notifyKey)
-        this.trainAlerts.track(
-          guildId,
-          TrainAlertTracker.fromCandidate(channel.id, sent.id, candidate),
+    if (!hasActiveRaidTrain(bosses, serverOffsetMs)) {
+      const candidates = engine.tick(cfg.leadMinutes)
+      for (const candidate of candidates) {
+        if (engine.hasNotified(candidate.leadMin, candidate.notifyKey)) continue
+        await this.sendTrainAlert(guildId, engine, channel, cfg, candidate, true)
+      }
+      return
+    }
+
+    const catchUp = engine.buildActiveTrainCatchUp()
+    if (!catchUp) return
+
+    const anchorMs = TrainAlertTracker.cycleAnchorMs(catchUp)
+    const prePingKey = trainNotifyKey(anchorMs, leadMin)
+    const withPing = !engine.hasNotified(leadMin, prePingKey)
+    await this.sendTrainAlert(guildId, engine, channel, cfg, catchUp, withPing, leadMin, prePingKey)
+  }
+
+  private async sendTrainAlert(
+    guildId: string,
+    engine: BossAlertEngine,
+    channel: TextChannel,
+    cfg: ReturnType<GuildConfigManager['get']>,
+    candidate: BossAlertCandidate,
+    withPing: boolean,
+    prePingLeadMin?: number,
+    prePingKey?: string,
+  ): Promise<void> {
+    try {
+      const sent = await channel.send({
+        content: withPing ? rolePingContent(cfg.pingRoleId) : undefined,
+        embeds: [buildTrainAlertEmbed(candidate)],
+        allowedMentions:
+          withPing && cfg.pingRoleId ? { roles: [cfg.pingRoleId] } : { parse: [] },
+      })
+      engine.markNotified(candidate.leadMin, candidate.notifyKey)
+      if (prePingKey != null && prePingLeadMin != null && withPing) {
+        engine.markNotified(prePingLeadMin, prePingKey)
+      }
+      this.trainAlerts.track(
+        guildId,
+        TrainAlertTracker.fromCandidate(channel.id, sent.id, candidate),
+      )
+    } catch (err) {
+      const code =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? (err as { code: number }).code
+          : null
+      if (code === 50013) {
+        console.error(
+          `[poll] missing permissions to send train alert in guild ${guildId} — grant Send Messages, Embed Links, and Mention Roles in the alert channel`,
         )
-      } catch (err) {
+      } else {
         console.error(`[poll] failed to send alert in guild ${guildId}:`, err)
       }
     }

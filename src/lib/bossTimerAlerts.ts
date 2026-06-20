@@ -51,6 +51,30 @@ export function relaxedTrainCopy(
   }
 }
 
+export function activeTrainCopy(
+  train: RaidBossAlertSnapshot[],
+): { title: string; body: string } {
+  if (train.length === 1) {
+    const boss = train[0]!
+    const place = boss.mapName?.trim() || 'world boss location'
+    return {
+      title: boss.monsterName,
+      body: `**${boss.monsterName}** is up at ${place}.`,
+    }
+  }
+
+  const lines = train.map((boss) => formatBossLine(boss))
+  return {
+    title: `Boss train (${train.length} spawns)`,
+    body: `Train in progress.\n${lines.join('\n')}`,
+  }
+}
+
+/** Dedupe key for the live embed (separate from the 5-min pre-ping key). */
+export function activeTrainEmbedKey(anchorSpawnUtcMs: number): string {
+  return `embed:${trainNotifyKey(anchorSpawnUtcMs, 0)}`
+}
+
 export type BossAlertCandidate = {
   train: RaidBossAlertSnapshot[]
   leadMin: number
@@ -204,6 +228,33 @@ export class BossAlertEngine {
     }
 
     return candidates
+  }
+
+  /** Post live embed when train is active but no alert message exists (missed pre-ping / deleted / restart). */
+  buildActiveTrainCatchUp(now = Date.now()): BossAlertCandidate | null {
+    const train = buildUnifiedAlertTrain(this.activeBossAlerts, now)
+    if (!train.some((b) => b.status === 'alive' || b.status === 'ready')) {
+      return null
+    }
+
+    const respawning = train.filter((b) => b.status === 'respawning')
+    const anchorMs =
+      this.trainCycleAnchorMs ??
+      (respawning.length > 0
+        ? Math.min(...respawning.map((b) => b.nextSpawnUtcMs))
+        : Math.min(...train.map((b) => b.nextSpawnUtcMs)))
+
+    const notifyKey = activeTrainEmbedKey(anchorMs)
+    if (this.leadState(0).notifiedKeys.has(notifyKey)) {
+      return null
+    }
+
+    return {
+      train,
+      leadMin: 0,
+      notifyKey,
+      copy: activeTrainCopy(train),
+    }
   }
 
   hasNotified(leadMin: number, notifyKey: string): boolean {
