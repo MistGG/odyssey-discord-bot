@@ -194,7 +194,6 @@ export class BossAlertEngine {
       if (state.notifiedKeys.has(notifyKey)) {
         continue
       }
-      state.notifiedKeys.add(notifyKey)
 
       candidates.push({
         train,
@@ -205,6 +204,18 @@ export class BossAlertEngine {
     }
 
     return candidates
+  }
+
+  hasNotified(leadMin: number, notifyKey: string): boolean {
+    return this.leadState(leadMin).notifiedKeys.has(notifyKey)
+  }
+
+  markNotified(leadMin: number, notifyKey: string): void {
+    this.leadState(leadMin).notifiedKeys.add(notifyKey)
+  }
+
+  getCycleAnchorMs(): number | null {
+    return this.trainCycleAnchorMs
   }
 }
 

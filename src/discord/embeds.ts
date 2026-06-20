@@ -50,7 +50,8 @@ export function buildTrainAlertEmbed(
   const slainNames = options?.slainNames ?? new Set<string>()
   const displayTrain = options?.liveTrain ?? train
   const trainActive = displayTrain.some(
-    (b) => b.status === 'alive' || b.status === 'ready',
+    (b) =>
+      !slainNames.has(b.monsterName) && (b.status === 'alive' || b.status === 'ready'),
   )
   const title = trainActive
     ? `${copy.title} · Active now`
