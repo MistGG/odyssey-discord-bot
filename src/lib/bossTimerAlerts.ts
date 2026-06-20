@@ -1,5 +1,6 @@
 import {
   BOSS_TRAIN_WINDOW_MS,
+  buildCurrentTrainWaveForAlerts,
   buildUnifiedAlertTrain,
   groupAlertSnapshotsForNotify,
   type RaidBossAlertSnapshot,
@@ -80,6 +81,7 @@ export type BossAlertCandidate = {
   leadMin: number
   notifyKey: string
   copy: { title: string; body: string }
+  cycleAnchorMs: number
 }
 
 type LeadState = {
@@ -144,17 +146,6 @@ export class BossAlertEngine {
     }
   }
 
-  private syncCycleAnchor(train: RaidBossAlertSnapshot[]): number | null {
-    const respawning = train.filter((b) => b.status === 'respawning')
-    if (respawning.length === 0) return null
-
-    if (this.trainCycleAnchorMs == null) {
-      this.trainCycleAnchorMs = Math.min(...respawning.map((b) => b.nextSpawnUtcMs))
-    }
-
-    return this.trainCycleAnchorMs
-  }
-
   tick(leadMinutes: number[], now = Date.now()): BossAlertCandidate[] {
     const normalized = leadMinutes
       .map((m) => Math.min(120, Math.max(1, Math.round(m))))
@@ -167,14 +158,21 @@ export class BossAlertEngine {
       return []
     }
 
-    const train = trains[0]!
+    const wave = buildCurrentTrainWaveForAlerts(this.activeBossAlerts, now)
+    if (!wave) return []
+
+    const train = wave.train
     const trainAlreadyStarted = train.some(
       (b) => b.status === 'alive' || b.status === 'ready',
     )
     this.advanceCycleIfStale(train, now)
     this.resetCycleIfComplete(train)
 
-    const anchorMs = this.syncCycleAnchor(train)
+    if (this.trainCycleAnchorMs == null) {
+      this.trainCycleAnchorMs = wave.cycleAnchorMs
+    }
+
+    const anchorMs = this.trainCycleAnchorMs
     if (anchorMs == null) return []
 
     const firstRemaining = anchorMs - now
@@ -224,6 +222,7 @@ export class BossAlertEngine {
         leadMin,
         notifyKey,
         copy: relaxedTrainCopy(train, leadMin),
+        cycleAnchorMs: wave.cycleAnchorMs,
       })
     }
 
@@ -232,28 +231,28 @@ export class BossAlertEngine {
 
   /** Post live embed when train is active but no alert message exists (missed pre-ping / deleted / restart). */
   buildActiveTrainCatchUp(now = Date.now()): BossAlertCandidate | null {
-    const train = buildUnifiedAlertTrain(this.activeBossAlerts, now)
-    if (!train.some((b) => b.status === 'alive' || b.status === 'ready')) {
+    const wave = buildCurrentTrainWaveForAlerts(this.activeBossAlerts, now)
+    if (!wave) return null
+    if (!wave.train.some((b) => b.status === 'alive' || b.status === 'ready')) {
       return null
     }
 
-    const respawning = train.filter((b) => b.status === 'respawning')
-    const anchorMs =
-      this.trainCycleAnchorMs ??
-      (respawning.length > 0
-        ? Math.min(...respawning.map((b) => b.nextSpawnUtcMs))
-        : Math.min(...train.map((b) => b.nextSpawnUtcMs)))
+    if (this.trainCycleAnchorMs == null) {
+      this.trainCycleAnchorMs = wave.cycleAnchorMs
+    }
 
+    const anchorMs = this.trainCycleAnchorMs ?? wave.cycleAnchorMs
     const notifyKey = activeTrainEmbedKey(anchorMs)
     if (this.leadState(0).notifiedKeys.has(notifyKey)) {
       return null
     }
 
     return {
-      train,
+      train: wave.train,
       leadMin: 0,
       notifyKey,
-      copy: activeTrainCopy(train),
+      copy: activeTrainCopy(wave.train),
+      cycleAnchorMs: wave.cycleAnchorMs,
     }
   }
 

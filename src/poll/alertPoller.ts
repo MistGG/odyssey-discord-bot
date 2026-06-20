@@ -224,6 +224,7 @@ export class AlertPoller {
         mapName: boss.map_name,
         status: boss.status,
         nextSpawnUtcMs: nextSpawnUtcMs(boss),
+        respawnSec: boss.respawn_sec,
       })
     }
     return train
@@ -353,12 +354,13 @@ export class AlertPoller {
       const liveTrain = this.resolveLiveTrain(updated.rosterNames, bosses)
       if (liveTrain.length === 0) return
 
-      const candidate: BossAlertCandidate = {
-        train: liveTrain,
-        leadMin: updated.leadMin,
-        notifyKey: updated.notifyKey,
-        copy: updated.copy,
-      }
+        const candidate: BossAlertCandidate = {
+          train: liveTrain,
+          leadMin: updated.leadMin,
+          notifyKey: updated.notifyKey,
+          copy: updated.copy,
+          cycleAnchorMs: updated.cycleAnchorMs,
+        }
 
       await message.edit({
         content: null,

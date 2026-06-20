@@ -42,14 +42,6 @@ export class TrainAlertTracker {
     this.byGuild.delete(guildId)
   }
 
-  static cycleAnchorMs(candidate: BossAlertCandidate): number {
-    const respawning = candidate.train.filter((b) => b.status === 'respawning')
-    if (respawning.length > 0) {
-      return Math.min(...respawning.map((b) => b.nextSpawnUtcMs))
-    }
-    return Math.min(...candidate.train.map((b) => b.nextSpawnUtcMs))
-  }
-
   static fromCandidate(
     channelId: string,
     messageId: string,
@@ -59,12 +51,18 @@ export class TrainAlertTracker {
       channelId,
       messageId,
       rosterNames: candidate.train.map((b) => b.monsterName),
-      cycleAnchorMs: TrainAlertTracker.cycleAnchorMs(candidate),
+      cycleAnchorMs: candidate.cycleAnchorMs,
       leadMin: candidate.leadMin,
       notifyKey: candidate.notifyKey,
       copy: candidate.copy,
       defeatedNames: [],
-      seenAliveNames: [],
+      seenAliveNames: candidate.train
+        .filter((b) => b.status === 'alive' || b.status === 'ready')
+        .map((b) => b.monsterName),
     }
+  }
+
+  static cycleAnchorMs(candidate: BossAlertCandidate): number {
+    return candidate.cycleAnchorMs
   }
 }

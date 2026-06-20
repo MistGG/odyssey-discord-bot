@@ -133,12 +133,14 @@ export function isBossSlain(
   return true
 }
 
-export function isBossSlainSnapshot(boss: RaidBossAlertSnapshot, serverOffsetMs: number): boolean {
-  if (boss.status === 'alive' || boss.status === 'ready') return false
-  const until = Math.max(0, boss.nextSpawnUtcMs - serverNowMs(serverOffsetMs))
-  // Snapshots lack respawn_sec; use a generous cycle floor (typical raid bosses ≈ 3h).
-  const cycleMs = 3 * 60 * 60 * 1000
-  return until > cycleMs * 0.85
+export function isBossSlainSnapshot(
+  boss: RaidBossAlertSnapshot,
+  serverOffsetMs: number,
+  allBosses?: RaidBossAlertSnapshot[],
+): boolean {
+  const nowMs = serverNowMs(serverOffsetMs)
+  const pool = allBosses ?? [boss]
+  return isBossSlainSnapshotAt(boss, pool, nowMs)
 }
 
 export function bossStatusLabel(boss: RaidBossEntry, serverOffsetMs: number): string {
@@ -159,6 +161,7 @@ export type RaidBossAlertSnapshot = {
   mapName: string
   status: RaidBossStatus
   nextSpawnUtcMs: number
+  respawnSec: number
 }
 
 export function toAlertSnapshots(bosses: RaidBossEntry[]): RaidBossAlertSnapshot[] {
@@ -167,7 +170,78 @@ export function toAlertSnapshots(bosses: RaidBossEntry[]): RaidBossAlertSnapshot
     mapName: boss.map_name,
     status: boss.status,
     nextSpawnUtcMs: nextSpawnUtcMs(boss),
+    respawnSec: boss.respawn_sec,
   }))
+}
+
+function isBossSlainSnapshotAt(
+  boss: RaidBossAlertSnapshot,
+  allBosses: RaidBossAlertSnapshot[],
+  nowMs: number,
+): boolean {
+  if (boss.status === 'alive' || boss.status === 'ready') return false
+  const until = Math.max(0, boss.nextSpawnUtcMs - nowMs)
+  const cycleMs = Math.max(boss.respawnSec, 60) * 1000
+  if (until <= cycleMs * 0.85) return false
+
+  const soonestSpawn = Math.min(...allBosses.map((b) => alertTrainSpawnMs(b, nowMs)))
+  const bossMs = alertTrainSpawnMs(boss, nowMs)
+  if (bossMs - soonestSpawn <= TRAIN_WAVE_TAIL_MS) return false
+
+  return true
+}
+
+export type CurrentTrainWave = {
+  train: RaidBossAlertSnapshot[]
+  cycleAnchorMs: number
+}
+
+/** Alert roster for the current train wave only — excludes next-cycle (~3h) respawns. */
+export function buildCurrentTrainWaveForAlerts(
+  snapshots: RaidBossAlertSnapshot[],
+  nowMs = Date.now(),
+): CurrentTrainWave | null {
+  const all = buildUnifiedAlertTrain(snapshots, nowMs)
+  if (all.length === 0) return null
+
+  const trainActive = all.some((b) => b.status === 'alive' || b.status === 'ready')
+
+  const inCycle = all.filter((b) => !isBossSlainSnapshotAt(b, all, nowMs))
+  if (inCycle.length === 0) return null
+
+  if (!trainActive) {
+    const respawning = inCycle.filter((b) => b.status === 'respawning')
+    if (respawning.length === 0) return null
+    const anchorMs = Math.min(...respawning.map((b) => b.nextSpawnUtcMs))
+    const train = inCycle.filter((b) => {
+      if (b.status === 'alive' || b.status === 'ready') return true
+      return b.nextSpawnUtcMs <= anchorMs + TRAIN_WAVE_TAIL_MS
+    })
+    if (train.length === 0) return null
+    return { train, cycleAnchorMs: anchorMs }
+  }
+
+  const wave = inCycle.filter((b) => {
+    if (b.status === 'alive' || b.status === 'ready') return true
+    const until = b.nextSpawnUtcMs - nowMs
+    return until <= TRAIN_WAVE_TAIL_MS
+  })
+  if (wave.length === 0) return null
+
+  const pastSlots = wave
+    .filter((b) => b.status === 'respawning' && b.nextSpawnUtcMs <= nowMs)
+    .map((b) => b.nextSpawnUtcMs)
+  const anchorMs =
+    pastSlots.length > 0
+      ? Math.min(...pastSlots)
+      : Math.min(...wave.map((b) => alertTrainSpawnMs(b, nowMs)))
+
+  const train = wave.filter((b) => {
+    if (b.status === 'alive' || b.status === 'ready') return true
+    return b.nextSpawnUtcMs <= anchorMs + TRAIN_WAVE_TAIL_MS
+  })
+
+  return { train, cycleAnchorMs: anchorMs }
 }
 
 /** Consecutive spawns within this gap form one train (e.g. Suka → Crowmon → Goatmon). */
@@ -284,10 +358,11 @@ export function groupAlertSnapshotsForNotify(
   bosses: RaidBossAlertSnapshot[],
   nowMs = Date.now(),
 ): RaidBossAlertSnapshot[][] {
-  const train = buildUnifiedAlertTrain(bosses, nowMs)
-  const hasUpcoming = train.some((b) => b.status === 'respawning')
+  const wave = buildCurrentTrainWaveForAlerts(bosses, nowMs)
+  if (!wave) return []
+  const hasUpcoming = wave.train.some((b) => b.status === 'respawning')
   if (!hasUpcoming) return []
-  return [train]
+  return [wave.train]
 }
 
 function mergeWaveTailSingletons(trains: RaidBossEntry[][], nowMs: number): RaidBossEntry[][] {
