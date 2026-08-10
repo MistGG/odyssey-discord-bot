@@ -1,7 +1,6 @@
 import {
   ContainerBuilder,
   MessageFlags,
-  SeparatorSpacingSize,
 } from 'discord.js'
 import {
   bossTrainSpawnMs,
@@ -14,20 +13,8 @@ import {
   type RaidBossEntry,
   type RaidTimerResponse,
 } from '../lib/raidTimerApi.js'
-import {
-  fetchMonsterDetailsForBosses,
-  wikiBossPortraitUrl,
-  type MonsterDetail,
-} from '../lib/wikiApi.js'
 
 const COLOR_TRAIN = 0x6366f1
-/** Discord V2: nested section children count toward the 40-component cap. */
-const DISCORD_MAX_COMPONENTS = 40
-/** One boss row: section + 2 text displays + thumbnail accessory. */
-const COMPONENTS_PER_BOSS_ROW = 4
-/** Header text + separator below header. */
-const COMPONENTS_OVERHEAD = 2
-const MAX_BOSSES = Math.floor((DISCORD_MAX_COMPONENTS - COMPONENTS_OVERHEAD) / COMPONENTS_PER_BOSS_ROW)
 
 export const TRAINS_MESSAGE_FLAGS = MessageFlags.IsComponentsV2
 
@@ -35,87 +22,52 @@ function discordTimestamp(ms: number, style: 'R' | 'f' = 'R'): string {
   return `<t:${Math.floor(ms / 1000)}:${style}>`
 }
 
-function bossPortraitUrl(boss: RaidBossEntry, monster: MonsterDetail | null): string | undefined {
-  const modelId = boss.model_id?.trim() || monster?.model_id?.trim()
-  if (!modelId) return undefined
-  const url = wikiBossPortraitUrl(modelId)
-  return url || undefined
-}
-
-function spawnLine(boss: RaidBossEntry, serverOffsetMs: number, allBosses: RaidBossEntry[]): string {
-  if (isBossSlain(boss, serverOffsetMs, allBosses)) return '💀 **Defeated**'
-  if (isBossAlive(boss)) return '🟢 **Alive now**'
-  if (isBossReady(boss)) return '🟡 **Ready**'
-  const spawnMs = nextSpawnUtcMs(boss)
-  return `⏱ ${discordTimestamp(spawnMs, 'R')} · ${discordTimestamp(spawnMs, 'f')}`
-}
-
-function bossNameLine(boss: RaidBossEntry, serverOffsetMs: number, allBosses: RaidBossEntry[]): string {
-  if (isBossSlain(boss, serverOffsetMs, allBosses)) return `~~**${boss.monster_name}**~~`
-  return `**${boss.monster_name}**`
-}
-
-type BossRow = {
-  boss: RaidBossEntry
-  trainSize: number
-  isFirstInTrain: boolean
-}
-
-function flattenVisibleBossRows(data: RaidTimerResponse, horizonMs?: number): BossRow[] {
-  const nowMs = serverNowMs(data.serverOffsetMs)
-  const visibleTrains = pickDisplayBossTrains(data.bosses, data.serverOffsetMs, horizonMs)
-  const rows: BossRow[] = []
-
-  for (const { bosses, totalSpawnCount } of visibleTrains) {
-    const ordered = [...bosses].sort((a, b) => bossTrainSpawnMs(a, nowMs) - bossTrainSpawnMs(b, nowMs))
-    for (let i = 0; i < ordered.length; i++) {
-      rows.push({
-        boss: ordered[i]!,
-        trainSize: totalSpawnCount,
-        isFirstInTrain: i === 0 && totalSpawnCount > 1,
-      })
-    }
+function bossLine(boss: RaidBossEntry, serverOffsetMs: number, allBosses: RaidBossEntry[]): string {
+  const map = boss.map_name?.trim() || 'Unknown map'
+  if (isBossSlain(boss, serverOffsetMs, allBosses)) {
+    return `• ~~${boss.monster_name}~~ · ${map} · Defeated`
   }
-
-  return rows
+  if (isBossAlive(boss)) {
+    return `• **${boss.monster_name}** · ${map} · Alive`
+  }
+  if (isBossReady(boss)) {
+    return `• **${boss.monster_name}** · ${map} · Ready`
+  }
+  return `• **${boss.monster_name}** · ${map} · ${discordTimestamp(nextSpawnUtcMs(boss), 'R')}`
 }
 
-function buildHeaderText(
-  data: RaidTimerResponse,
-  rows: BossRow[],
-  truncated: boolean,
-): string {
-  const shown = rows.slice(0, MAX_BOSSES)
-  const alive = data.bosses.filter((b) => isBossAlive(b)).length
-  const ready = data.bosses.filter((b) => isBossReady(b)).length
-  const trainLead = shown.find((r) => r.isFirstInTrain) ?? shown[0]
-  const rosterSize = trainLead?.trainSize ?? shown.length
+function orderedRoster(data: RaidTimerResponse, horizonMs?: number): RaidBossEntry[] {
+  const nowMs = serverNowMs(data.serverOffsetMs)
+  const trains = pickDisplayBossTrains(data.bosses, data.serverOffsetMs, horizonMs)
+  const roster = trains[0]?.bosses ?? []
+  return [...roster].sort((a, b) => bossTrainSpawnMs(a, nowMs) - bossTrainSpawnMs(b, nowMs))
+}
 
-  const parts = [
-    data.live ? '**Live**' : '**Stale**',
-    `${shown.length} boss${shown.length === 1 ? '' : 'es'}`,
-    rosterSize > 0 ? '1 train' : null,
-    alive > 0 ? `${alive} alive` : null,
-    ready > 0 ? `${ready} ready` : null,
+function buildSnapshotText(data: RaidTimerResponse, bosses: RaidBossEntry[]): string {
+  const nowMs = serverNowMs(data.serverOffsetMs)
+  const lead = bosses[0]
+  const leadLine = !lead
+    ? null
+    : isBossAlive(lead) || isBossReady(lead)
+      ? 'active now'
+      : isBossSlain(lead, data.serverOffsetMs, bosses)
+        ? 'in progress'
+        : `first ${discordTimestamp(bossTrainSpawnMs(lead, nowMs), 'R')}`
+
+  const headerBits = [
+    `${bosses.length} boss${bosses.length === 1 ? '' : 'es'}`,
+    leadLine,
+    data.live ? null : 'stale timer',
   ].filter(Boolean)
 
-  const lines = [`## Raid trains`, parts.join(' · ')]
-
-  if (trainLead) {
-    const nowMs = serverNowMs(data.serverOffsetMs)
-    const lead = bossTrainSpawnMs(trainLead.boss, nowMs)
-    const leadLine =
-      isBossAlive(trainLead.boss) || isBossReady(trainLead.boss)
-        ? 'active now'
-        : `first ${discordTimestamp(lead, 'R')}`
-    lines.push(`🚂 **${rosterSize} spawns** · ${leadLine}`)
-  }
-
-  if (truncated) {
-    lines.push(`_Showing first ${MAX_BOSSES} of ${rows.length} bosses._`)
-  }
-
-  lines.push('', '_Odyssey Calc · snapshot · run /trains again to refresh_')
+  const lines = [
+    '## Next raid train',
+    headerBits.join(' · '),
+    '',
+    ...bosses.map((boss) => bossLine(boss, data.serverOffsetMs, bosses)),
+    '',
+    '_Run /trains again to refresh_',
+  ]
 
   return lines.join('\n')
 }
@@ -133,57 +85,22 @@ export async function buildTrainsMessage(
   data: RaidTimerResponse,
   options?: TrainsMessageOptions,
 ): Promise<TrainsMessagePayload> {
-  const horizonMs = options?.horizonMs
-  const rows = flattenVisibleBossRows(data, horizonMs)
+  const bosses = orderedRoster(data, options?.horizonMs)
   const container = new ContainerBuilder().setAccentColor(COLOR_TRAIN)
 
-  if (rows.length === 0) {
+  if (bosses.length === 0) {
     const emptyText =
       data.bosses.length > 0
-        ? '## Raid trains\nNo raid train in the current lookahead window.'
-        : '## Raid trains\nNo upcoming raid bosses in the timer response.'
+        ? '## Next raid train\nNo raid train in the current lookahead window.'
+        : '## Next raid train\nNo upcoming raid bosses in the timer response.'
     container.addTextDisplayComponents((text) => text.setContent(emptyText))
     return { components: [container], flags: TRAINS_MESSAGE_FLAGS }
   }
 
-  const truncated = rows.length > MAX_BOSSES
-  const shownRows = rows.slice(0, MAX_BOSSES)
-  const needsWiki = shownRows.some((r) => !r.boss.model_id?.trim())
-  const monsters = needsWiki
-    ? await fetchMonsterDetailsForBosses(shownRows.map((r) => r.boss.monster_id))
-    : new Map<string, MonsterDetail>()
-
-  container.addTextDisplayComponents((text) =>
-    text.setContent(buildHeaderText(data, rows, truncated)),
-  )
-  container.addSeparatorComponents((sep) =>
-    sep.setDivider(true).setSpacing(SeparatorSpacingSize.Small),
-  )
-
-  for (const row of shownRows) {
-    const boss = row.boss
-    const map = boss.map_name?.trim() || 'Unknown map'
-    const portrait = bossPortraitUrl(boss, monsters.get(boss.monster_id) ?? null)
-
-    container.addSectionComponents((section) => {
-      section.addTextDisplayComponents(
-        (text) =>
-          text.setContent(`${bossNameLine(boss, data.serverOffsetMs, data.bosses)}\n📍 ${map}`),
-        (text) => text.setContent(spawnLine(boss, data.serverOffsetMs, data.bosses)),
-      )
-      if (portrait) {
-        section.setThumbnailAccessory((thumb) =>
-          thumb.setURL(portrait).setDescription(boss.monster_name),
-        )
-      }
-      return section
-    })
-  }
-
+  container.addTextDisplayComponents((text) => text.setContent(buildSnapshotText(data, bosses)))
   return { components: [container], flags: TRAINS_MESSAGE_FLAGS }
 }
 
-/** @deprecated Use buildTrainsMessage for /trains replies. */
 export async function buildTrainsViewEmbeds(data: RaidTimerResponse) {
   const { components } = await buildTrainsMessage(data)
   return components
