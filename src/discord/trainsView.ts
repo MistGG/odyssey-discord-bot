@@ -5,7 +5,6 @@ import {
 } from 'discord.js'
 import {
   bossTrainSpawnMs,
-  hasActiveDisplayTrain,
   isBossAlive,
   isBossReady,
   isBossSlain,
@@ -85,7 +84,6 @@ function buildHeaderText(
   data: RaidTimerResponse,
   rows: BossRow[],
   truncated: boolean,
-  updatedAtMs?: number,
 ): string {
   const shown = rows.slice(0, MAX_BOSSES)
   const alive = data.bosses.filter((b) => isBossAlive(b)).length
@@ -117,12 +115,7 @@ function buildHeaderText(
     lines.push(`_Showing first ${MAX_BOSSES} of ${rows.length} bosses._`)
   }
 
-  lines.push(
-    '',
-    updatedAtMs
-      ? `_Odyssey Calc · updated ${discordTimestamp(updatedAtMs, 'R')} · 10s during active trains · 30s otherwise_`
-      : '_Odyssey Calc · spawn times update live · 10s during active trains · 30s otherwise_',
-  )
+  lines.push('', '_Odyssey Calc · snapshot · run /trains again to refresh_')
 
   return lines.join('\n')
 }
@@ -130,13 +123,10 @@ function buildHeaderText(
 export type TrainsMessagePayload = {
   components: ContainerBuilder[]
   flags: typeof TRAINS_MESSAGE_FLAGS
-  activeTrain: boolean
 }
 
 export type TrainsMessageOptions = {
-  /** Wider horizon for live /trains refresh (default: alert lookahead). */
   horizonMs?: number
-  updatedAtMs?: number
 }
 
 export async function buildTrainsMessage(
@@ -145,7 +135,6 @@ export async function buildTrainsMessage(
 ): Promise<TrainsMessagePayload> {
   const horizonMs = options?.horizonMs
   const rows = flattenVisibleBossRows(data, horizonMs)
-  const activeTrain = hasActiveDisplayTrain(data.bosses, data.serverOffsetMs)
   const container = new ContainerBuilder().setAccentColor(COLOR_TRAIN)
 
   if (rows.length === 0) {
@@ -154,7 +143,7 @@ export async function buildTrainsMessage(
         ? '## Raid trains\nNo raid train in the current lookahead window.'
         : '## Raid trains\nNo upcoming raid bosses in the timer response.'
     container.addTextDisplayComponents((text) => text.setContent(emptyText))
-    return { components: [container], flags: TRAINS_MESSAGE_FLAGS, activeTrain }
+    return { components: [container], flags: TRAINS_MESSAGE_FLAGS }
   }
 
   const truncated = rows.length > MAX_BOSSES
@@ -165,7 +154,7 @@ export async function buildTrainsMessage(
     : new Map<string, MonsterDetail>()
 
   container.addTextDisplayComponents((text) =>
-    text.setContent(buildHeaderText(data, rows, truncated, options?.updatedAtMs)),
+    text.setContent(buildHeaderText(data, rows, truncated)),
   )
   container.addSeparatorComponents((sep) =>
     sep.setDivider(true).setSpacing(SeparatorSpacingSize.Small),
@@ -191,7 +180,7 @@ export async function buildTrainsMessage(
     })
   }
 
-  return { components: [container], flags: TRAINS_MESSAGE_FLAGS, activeTrain }
+  return { components: [container], flags: TRAINS_MESSAGE_FLAGS }
 }
 
 /** @deprecated Use buildTrainsMessage for /trains replies. */
