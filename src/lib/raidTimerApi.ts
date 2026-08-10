@@ -365,58 +365,6 @@ export function groupAlertSnapshotsForNotify(
   return [wave.train]
 }
 
-function mergeWaveTailSingletons(trains: RaidBossEntry[][], nowMs: number): RaidBossEntry[][] {
-  if (trains.length <= 1) return trains
-
-  const sorted = [...trains].sort((a, b) => {
-    const af = Math.min(...a.map((x) => bossTrainSpawnMs(x, nowMs)))
-    const bf = Math.min(...b.map((x) => bossTrainSpawnMs(x, nowMs)))
-    return af - bf
-  })
-
-  const lead = [...sorted[0]!]
-  const leadMs = Math.min(...lead.map((b) => bossTrainSpawnMs(b, nowMs)))
-  const rest: RaidBossEntry[][] = []
-
-  for (let i = 1; i < sorted.length; i++) {
-    const train = sorted[i]!
-    const trainLeadMs = Math.min(...train.map((b) => bossTrainSpawnMs(b, nowMs)))
-    if (train.length === 1 && trainLeadMs - leadMs <= TRAIN_WAVE_TAIL_MS) {
-      lead.push(train[0]!)
-    } else {
-      rest.push(train)
-    }
-  }
-
-  lead.sort((a, b) => bossTrainSpawnMs(a, nowMs) - bossTrainSpawnMs(b, nowMs))
-  return [lead, ...rest]
-}
-
-function prependAliveNeptunemonToTrain(
-  trains: BossTimerVisibleTrain[],
-  bosses: RaidBossEntry[],
-  nowMs: number,
-): BossTimerVisibleTrain[] {
-  const neptune = bosses.find((b) => b.monster_name === 'Neptunemon')
-  if (!neptune || (!isBossAlive(neptune) && !isBossReady(neptune))) return trains
-
-  const targetIdx = trains.findIndex((t) => t.bosses.length > 1)
-  const idx = targetIdx >= 0 ? targetIdx : 0
-  const target = trains[idx]
-  if (!target || target.bosses.some((b) => b.monster_id === neptune.monster_id)) return trains
-
-  return trains.map((t, i) => {
-    if (i !== idx) return t
-    const merged = [neptune, ...t.bosses].sort(
-      (a, b) => bossTrainSpawnMs(a, nowMs) - bossTrainSpawnMs(b, nowMs),
-    )
-    return {
-      bosses: merged,
-      totalSpawnCount: Math.max(t.totalSpawnCount, merged.length),
-    }
-  })
-}
-
 export function sortBossesForVisibility(bosses: RaidBossEntry[], nowMs: number): RaidBossEntry[] {
   return [...bosses].sort((a, b) => {
     const da = bossTrainSpawnMs(a, nowMs)
@@ -438,14 +386,43 @@ export function pickVisibleBosses(
 
 export type BossTimerVisibleTrain = {
   bosses: RaidBossEntry[]
-  /** Full roster train size when grouped spawns; otherwise same as `bosses.length`. */
+  /** Full roster train size (one unique instance of every raid boss). */
   totalSpawnCount: number
 }
 
-/** Visible bosses clustered into spawn trains for the timer UI. */
+/** One unique entry per boss id — prefer alive/ready, else soonest spawn. */
+export function uniqueBossRoster(bosses: RaidBossEntry[], nowMs = Date.now()): RaidBossEntry[] {
+  const byId = new Map<string, RaidBossEntry>()
+
+  for (const boss of bosses) {
+    const existing = byId.get(boss.monster_id)
+    if (!existing) {
+      byId.set(boss.monster_id, boss)
+      continue
+    }
+
+    const bossActive = isBossAlive(boss) || isBossReady(boss)
+    const existingActive = isBossAlive(existing) || isBossReady(existing)
+    if (bossActive && !existingActive) {
+      byId.set(boss.monster_id, boss)
+      continue
+    }
+    if (!bossActive && !existingActive) {
+      if (bossTrainSpawnMs(boss, nowMs) < bossTrainSpawnMs(existing, nowMs)) {
+        byId.set(boss.monster_id, boss)
+      }
+    }
+  }
+
+  return [...byId.values()].sort(
+    (a, b) => bossTrainSpawnMs(a, nowMs) - bossTrainSpawnMs(b, nowMs),
+  )
+}
+
+/** Visible bosses as the full-roster train for the timer UI. */
 export function pickVisibleBossTrains(
   bosses: RaidBossEntry[],
-  count: number,
+  _count: number,
   serverOffsetMs = 0,
 ): BossTimerVisibleTrain[] {
   return pickDisplayBossTrains(bosses, serverOffsetMs, TRAIN_LOOKAHEAD_MS)
@@ -461,6 +438,7 @@ function isTrainInProgress(
   return slain > 0 && slain < train.length
 }
 
+/** Alert-poller active check — still based on 5-minute spawn clusters. */
 export function hasActiveRaidTrain(bosses: RaidBossEntry[], serverOffsetMs = 0): boolean {
   const nowMs = serverNowMs(serverOffsetMs)
   for (const train of groupBossesIntoTrains(bosses, nowMs)) {
@@ -469,42 +447,36 @@ export function hasActiveRaidTrain(bosses: RaidBossEntry[], serverOffsetMs = 0):
   return false
 }
 
-/** Active train first; otherwise upcoming trains within `horizonMs` (default 5h). */
+/** /trains board active check — full unique roster mid-cycle. */
+export function hasActiveDisplayTrain(bosses: RaidBossEntry[], serverOffsetMs = 0): boolean {
+  const nowMs = serverNowMs(serverOffsetMs)
+  const roster = uniqueBossRoster(bosses, nowMs)
+  if (roster.length === 0) return false
+  return isTrainInProgress(roster, serverOffsetMs, roster)
+}
+
+/**
+ * One train = one unique instance of every raid boss (full cycle roster).
+ * Active mid-cycle trains always show; otherwise show when a non-slain boss is within `horizonMs`.
+ */
 export function pickDisplayBossTrains(
   bosses: RaidBossEntry[],
   serverOffsetMs = 0,
   horizonMs = TRAIN_LOOKAHEAD_MS,
 ): BossTimerVisibleTrain[] {
   const nowMs = serverNowMs(serverOffsetMs)
-  const grouped = mergeWaveTailSingletons(groupBossesIntoTrains(bosses, nowMs), nowMs)
-  const fullTrainByBossId = new Map<string, RaidBossEntry[]>()
-  for (const train of grouped) {
-    if (train.length >= 2) {
-      for (const boss of train) fullTrainByBossId.set(boss.monster_id, train)
-    }
+  const roster = uniqueBossRoster(bosses, nowMs)
+  if (roster.length === 0) return []
+
+  if (isTrainInProgress(roster, serverOffsetMs, roster)) {
+    return [{ bosses: roster, totalSpawnCount: roster.length }]
   }
 
-  const toVisibleTrain = (train: RaidBossEntry[]): BossTimerVisibleTrain => ({
-    bosses: train,
-    totalSpawnCount: fullTrainByBossId.get(train[0]!.monster_id)?.length ?? train.length,
-  })
+  const nonSlain = roster.filter((b) => !isBossSlain(b, serverOffsetMs, roster))
+  if (nonSlain.length === 0) return []
 
-  const active = grouped.filter((train) => isTrainInProgress(train, serverOffsetMs, bosses))
-  if (active.length > 0) {
-    return prependAliveNeptunemonToTrain(active.map(toVisibleTrain), bosses, nowMs)
-  }
+  const leadMs = Math.min(...nonSlain.map((b) => bossTrainSpawnMs(b, nowMs))) - nowMs
+  if (leadMs > horizonMs) return []
 
-  const upcoming = grouped
-    .filter((train) => {
-      if (train.every((b) => isBossSlain(b, serverOffsetMs, bosses))) return false
-      const leadMs = Math.min(...train.map((b) => bossTrainSpawnMs(b, nowMs))) - nowMs
-      return leadMs <= horizonMs
-    })
-    .sort((a, b) => {
-      const af = Math.min(...a.map((x) => bossTrainSpawnMs(x, nowMs)))
-      const bf = Math.min(...b.map((x) => bossTrainSpawnMs(x, nowMs)))
-      return af - bf
-    })
-
-  return prependAliveNeptunemonToTrain(upcoming.map(toVisibleTrain), bosses, nowMs)
+  return [{ bosses: roster, totalSpawnCount: roster.length }]
 }

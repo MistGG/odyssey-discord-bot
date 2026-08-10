@@ -5,14 +5,13 @@ import {
 } from 'discord.js'
 import {
   bossTrainSpawnMs,
-  hasActiveRaidTrain,
+  hasActiveDisplayTrain,
   isBossAlive,
   isBossReady,
   isBossSlain,
   nextSpawnUtcMs,
   pickDisplayBossTrains,
   serverNowMs,
-  TRAINS_LIVE_LOOKAHEAD_MS,
   type RaidBossEntry,
   type RaidTimerResponse,
 } from '../lib/raidTimerApi.js'
@@ -91,26 +90,27 @@ function buildHeaderText(
   const shown = rows.slice(0, MAX_BOSSES)
   const alive = data.bosses.filter((b) => isBossAlive(b)).length
   const ready = data.bosses.filter((b) => isBossReady(b)).length
-  const trainRows = shown.filter((r) => r.isFirstInTrain)
+  const trainLead = shown.find((r) => r.isFirstInTrain) ?? shown[0]
+  const rosterSize = trainLead?.trainSize ?? shown.length
 
   const parts = [
     data.live ? '**Live**' : '**Stale**',
     `${shown.length} boss${shown.length === 1 ? '' : 'es'}`,
-    trainRows.length > 0 ? `${trainRows.length} train${trainRows.length === 1 ? '' : 's'}` : null,
+    rosterSize > 0 ? '1 train' : null,
     alive > 0 ? `${alive} alive` : null,
     ready > 0 ? `${ready} ready` : null,
   ].filter(Boolean)
 
   const lines = [`## Raid trains`, parts.join(' · ')]
 
-  for (const row of trainRows) {
+  if (trainLead) {
     const nowMs = serverNowMs(data.serverOffsetMs)
-    const lead = bossTrainSpawnMs(row.boss, nowMs)
+    const lead = bossTrainSpawnMs(trainLead.boss, nowMs)
     const leadLine =
-      isBossAlive(row.boss) || isBossReady(row.boss)
+      isBossAlive(trainLead.boss) || isBossReady(trainLead.boss)
         ? 'active now'
         : `first ${discordTimestamp(lead, 'R')}`
-    lines.push(`🚂 **${row.trainSize} spawns** · ${leadLine}`)
+    lines.push(`🚂 **${rosterSize} spawns** · ${leadLine}`)
   }
 
   if (truncated) {
@@ -145,13 +145,13 @@ export async function buildTrainsMessage(
 ): Promise<TrainsMessagePayload> {
   const horizonMs = options?.horizonMs
   const rows = flattenVisibleBossRows(data, horizonMs)
-  const activeTrain = hasActiveRaidTrain(data.bosses, data.serverOffsetMs)
+  const activeTrain = hasActiveDisplayTrain(data.bosses, data.serverOffsetMs)
   const container = new ContainerBuilder().setAccentColor(COLOR_TRAIN)
 
   if (rows.length === 0) {
     const emptyText =
       data.bosses.length > 0
-        ? '## Raid trains\nNo active raid trains in the next 5 hours.'
+        ? '## Raid trains\nNo raid train in the current lookahead window.'
         : '## Raid trains\nNo upcoming raid bosses in the timer response.'
     container.addTextDisplayComponents((text) => text.setContent(emptyText))
     return { components: [container], flags: TRAINS_MESSAGE_FLAGS, activeTrain }
