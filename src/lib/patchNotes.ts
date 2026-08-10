@@ -1,11 +1,26 @@
-import { stripHtmlToPlainText } from './releaseNotesText.js'
+import { outlineMarkdownToDiscord, stripHtmlToPlainText } from './releaseNotesText.js'
 
 export type PatchNoteEntry = {
   id: string
   title: string
   url: string
   preview: string
+  /** Preferred Discord-ready body (from Outline document text + children). */
+  bodyText: string
+  /** HTML scrape fallback when document text APIs are unavailable. */
   bodyHtml: string
+}
+
+export type OutlineShareTreeNode = {
+  id: string
+  title: string
+  url: string
+  children?: OutlineShareTreeNode[]
+}
+
+export type PatchNoteSection = {
+  title: string | null
+  text: string
 }
 
 export function sanitizeOutlineContentHtml(html: string): string {
@@ -28,12 +43,13 @@ function readOutlineTitle(html: string): string {
 }
 
 export function parseOutlineDocSummary(html: string, url: string): PatchNoteEntry {
-  const id = url.split('/doc/')[1]?.replace(/\/$/, '') ?? url
+  const id = docSlugFromUrl(url)
   return {
     id,
     title: readOutlineTitle(html),
     url,
     preview: '',
+    bodyText: '',
     bodyHtml: '',
   }
 }
@@ -47,14 +63,49 @@ export function parseOutlineDocPage(html: string, url: string): PatchNoteEntry {
 
   const contentMatch = articleMatch[1].match(/<div id="content"[^>]*>([\s\S]*?)<\/div>/i)
   const bodyHtml = sanitizeOutlineContentHtml(contentMatch?.[1] ?? '')
+  const bodyText = stripHtmlToPlainText(bodyHtml)
 
-  return { ...summary, bodyHtml }
+  return { ...summary, bodyHtml, bodyText }
 }
 
 export function parsePatchNotesSitemap(xml: string): string[] {
   return [...xml.matchAll(/<loc>([^<]+\/doc\/[^<]+)<\/loc>/g)]
     .map((match) => match[1].trim())
     .filter(Boolean)
+}
+
+export function docSlugFromUrl(url: string): string {
+  return url.split('/doc/')[1]?.replace(/\/$/, '') ?? url
+}
+
+export function latestReleaseFromShareTree(
+  tree: OutlineShareTreeNode | null | undefined,
+): OutlineShareTreeNode | null {
+  const releases = tree?.children
+  if (!releases?.length) return null
+  return releases[0] ?? null
+}
+
+export function composePatchNoteBody(sections: PatchNoteSection[]): string {
+  const parts: string[] = []
+
+  for (const section of sections) {
+    const text = outlineMarkdownToDiscord(section.text)
+    if (!text) continue
+
+    if (section.title) {
+      parts.push(`**${section.title.trim()}**\n\n${text}`)
+    } else {
+      parts.push(text)
+    }
+  }
+
+  return parts.join('\n\n').trim()
+}
+
+export function patchNoteBody(note: PatchNoteEntry): string {
+  if (note.bodyText.trim()) return note.bodyText.trim()
+  return stripHtmlToPlainText(note.bodyHtml)
 }
 
 export function patchNoteDisplayParts(title: string): { date: string | null; label: string } {

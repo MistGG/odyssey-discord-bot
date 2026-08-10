@@ -1,40 +1,50 @@
 import { EmbedBuilder } from 'discord.js'
 import {
+  patchNoteBody,
   patchNoteDisplayParts,
   patchNoteKind,
   type PatchNoteEntry,
 } from '../lib/patchNotes.js'
-import { stripHtmlToPlainText } from '../lib/releaseNotesText.js'
+import { splitTextForDiscord } from '../lib/releaseNotesText.js'
+
 const EMBED_COLOR = 0x3ee0ff
 const MAX_DESCRIPTION = 4096
+const FALLBACK_DESCRIPTION = 'Open the link below for full patch notes.'
 
-function truncate(text: string, max: number): string {
-  if (text.length <= max) return text
-  return `${text.slice(0, max - 1)}…`
-}
-
-function embedTitle(note: PatchNoteEntry): string {
+function embedTitle(note: PatchNoteEntry, part?: { index: number; total: number }): string {
   const { date, label } = patchNoteDisplayParts(note.title)
   const kind = patchNoteKind(note.title)
   const datePart = date ? `[${date}] ` : ''
-  return `${datePart}${kind} · ${label}`
+  const base = `${datePart}${kind} · ${label}`
+  if (!part || part.total <= 1) return base
+  return `${base} (${part.index}/${part.total})`
 }
 
-export function buildPatchNoteEmbed(note: PatchNoteEntry, options?: { test?: boolean }): EmbedBuilder {
-  const plainBody = stripHtmlToPlainText(note.bodyHtml)
-  const description = plainBody
-    ? truncate(plainBody, MAX_DESCRIPTION)
-    : 'Open the link below for full patch notes.'
+export function buildPatchNoteEmbeds(
+  note: PatchNoteEntry,
+  options?: { test?: boolean },
+): EmbedBuilder[] {
+  const body = patchNoteBody(note)
+  const chunks = body ? splitTextForDiscord(body, MAX_DESCRIPTION) : [FALLBACK_DESCRIPTION]
+  const total = chunks.length
+  const footer = options?.test
+    ? 'Odyssey Calc · patch notes · test preview'
+    : 'Odyssey Calc · patch notes'
 
-  return new EmbedBuilder()
-    .setColor(EMBED_COLOR)
-    .setTitle(embedTitle(note))
-    .setURL(note.url)
-    .setDescription(description)
-    .setFooter({
-      text: options?.test
-        ? 'Odyssey Calc · patch notes · test preview'
-        : 'Odyssey Calc · patch notes',
-    })
-    .setTimestamp()
+  return chunks.map((description, index) =>
+    new EmbedBuilder()
+      .setColor(EMBED_COLOR)
+      .setTitle(embedTitle(note, { index: index + 1, total }))
+      .setURL(note.url)
+      .setDescription(description)
+      .setFooter({ text: total > 1 ? `${footer} · ${index + 1}/${total}` : footer })
+      .setTimestamp(),
+  )
+}
+
+export function buildPatchNoteEmbed(
+  note: PatchNoteEntry,
+  options?: { test?: boolean },
+): EmbedBuilder {
+  return buildPatchNoteEmbeds(note, options)[0]!
 }
