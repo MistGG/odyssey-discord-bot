@@ -17,29 +17,46 @@ export type TrackedTrainAlert = {
 }
 
 export class TrainAlertTracker {
-  private readonly byGuild = new Map<string, TrackedTrainAlert>()
+  private readonly byGuild = new Map<string, Map<string, TrackedTrainAlert>>()
 
-  track(guildId: string, alert: TrackedTrainAlert): void {
-    this.byGuild.set(guildId, alert)
+  track(guildId: string, laneKey: string, alert: TrackedTrainAlert): void {
+    let lanes = this.byGuild.get(guildId)
+    if (!lanes) {
+      lanes = new Map()
+      this.byGuild.set(guildId, lanes)
+    }
+    lanes.set(laneKey, alert)
   }
 
-  get(guildId: string): TrackedTrainAlert | null {
-    return this.byGuild.get(guildId) ?? null
+  get(guildId: string, laneKey: string): TrackedTrainAlert | null {
+    return this.byGuild.get(guildId)?.get(laneKey) ?? null
   }
 
-  list(guildId: string): TrackedTrainAlert[] {
-    const alert = this.byGuild.get(guildId)
-    return alert ? [alert] : []
+  list(guildId: string): { laneKey: string; alert: TrackedTrainAlert }[] {
+    const lanes = this.byGuild.get(guildId)
+    if (!lanes) return []
+    return [...lanes.entries()].map(([laneKey, alert]) => ({ laneKey, alert }))
   }
 
-  update(guildId: string, patch: Partial<TrackedTrainAlert>): void {
-    const current = this.byGuild.get(guildId)
+  update(guildId: string, laneKey: string, patch: Partial<TrackedTrainAlert>): void {
+    const current = this.get(guildId, laneKey)
     if (!current) return
-    this.byGuild.set(guildId, { ...current, ...patch })
+    this.byGuild.get(guildId)!.set(laneKey, { ...current, ...patch })
   }
 
-  remove(guildId: string): void {
-    this.byGuild.delete(guildId)
+  remove(guildId: string, laneKey: string): void {
+    const lanes = this.byGuild.get(guildId)
+    if (!lanes) return
+    lanes.delete(laneKey)
+    if (lanes.size === 0) this.byGuild.delete(guildId)
+  }
+
+  hasAny(guildId?: string): boolean {
+    if (guildId) return (this.byGuild.get(guildId)?.size ?? 0) > 0
+    for (const lanes of this.byGuild.values()) {
+      if (lanes.size > 0) return true
+    }
+    return false
   }
 
   static fromCandidate(

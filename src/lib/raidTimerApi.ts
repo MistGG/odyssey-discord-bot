@@ -174,6 +174,84 @@ export function toAlertSnapshots(bosses: RaidBossEntry[]): RaidBossAlertSnapshot
   }))
 }
 
+/** 10-min Verdandi spawn — not part of the 3h world-raid train. */
+const IGNORED_TRAIN_BOSS_IDS = new Set(['m1urpnvk'])
+const IGNORED_TRAIN_BOSS_NAMES = new Set(['dexdorugreymon'])
+
+/** Own cycle (5h). Separate 1-boss train; ends when this boss dies. */
+const SOLO_TRAIN_BOSS_IDS = new Set(['mb4wgy4'])
+const SOLO_TRAIN_BOSS_NAMES = new Set(['omegamon'])
+
+export const MAIN_TRAIN_LANE_KEY = 'main'
+
+function normalizeTrainBossName(name: string): string {
+  return name.trim().toLowerCase().replace(/[\s_-]+/g, '')
+}
+
+function trainBossName(boss: RaidBossEntry | RaidBossAlertSnapshot): string {
+  return 'monster_name' in boss ? boss.monster_name : boss.monsterName
+}
+
+function trainBossId(boss: RaidBossEntry | RaidBossAlertSnapshot): string {
+  return 'monster_id' in boss ? boss.monster_id : ''
+}
+
+export function isIgnoredTrainBoss(boss: RaidBossEntry | RaidBossAlertSnapshot | string): boolean {
+  if (typeof boss === 'string') return IGNORED_TRAIN_BOSS_NAMES.has(normalizeTrainBossName(boss))
+  if (trainBossId(boss) && IGNORED_TRAIN_BOSS_IDS.has(trainBossId(boss))) return true
+  return IGNORED_TRAIN_BOSS_NAMES.has(normalizeTrainBossName(trainBossName(boss)))
+}
+
+export function isSoloTrainBoss(boss: RaidBossEntry | RaidBossAlertSnapshot | string): boolean {
+  if (typeof boss === 'string') return SOLO_TRAIN_BOSS_NAMES.has(normalizeTrainBossName(boss))
+  if (trainBossId(boss) && SOLO_TRAIN_BOSS_IDS.has(trainBossId(boss))) return true
+  return SOLO_TRAIN_BOSS_NAMES.has(normalizeTrainBossName(trainBossName(boss)))
+}
+
+export function soloTrainLaneKey(boss: RaidBossEntry | RaidBossAlertSnapshot | string): string {
+  const name = typeof boss === 'string' ? boss : trainBossName(boss)
+  return `solo:${name}`
+}
+
+export type TrainLane<T> = {
+  key: string
+  bosses: T[]
+}
+
+/** Drop ignored bosses and split solo bosses (Omegamon) onto their own lanes. */
+export function partitionTrainLanes<T extends RaidBossEntry | RaidBossAlertSnapshot>(
+  bosses: T[],
+): TrainLane<T>[] {
+  const main: T[] = []
+  const solos = new Map<string, T[]>()
+
+  for (const boss of bosses) {
+    if (isIgnoredTrainBoss(boss)) continue
+    if (isSoloTrainBoss(boss)) {
+      const key = soloTrainLaneKey(boss)
+      const list = solos.get(key) ?? []
+      list.push(boss)
+      solos.set(key, list)
+      continue
+    }
+    main.push(boss)
+  }
+
+  const lanes: TrainLane<T>[] = []
+  if (main.length > 0) lanes.push({ key: MAIN_TRAIN_LANE_KEY, bosses: main })
+  for (const [key, list] of solos) {
+    lanes.push({ key, bosses: list })
+  }
+  return lanes
+}
+
+export function bossesForTrainLane<T extends RaidBossEntry | RaidBossAlertSnapshot>(
+  bosses: T[],
+  laneKey: string,
+): T[] {
+  return partitionTrainLanes(bosses).find((lane) => lane.key === laneKey)?.bosses ?? []
+}
+
 function isBossSlainSnapshotAt(
   boss: RaidBossAlertSnapshot,
   allBosses: RaidBossAlertSnapshot[],
@@ -342,7 +420,9 @@ export function buildUnifiedAlertTrain(
   nowMs = Date.now(),
 ): RaidBossAlertSnapshot[] {
   const inCycle = bosses.filter(
-    (b) => b.status === 'alive' || b.status === 'ready' || b.status === 'respawning',
+    (b) =>
+      !isIgnoredTrainBoss(b) &&
+      (b.status === 'alive' || b.status === 'ready' || b.status === 'respawning'),
   )
   if (inCycle.length === 0) return []
 
@@ -385,6 +465,7 @@ export type BossTimerVisibleTrain = {
   bosses: RaidBossEntry[]
   /** Full roster train size (one unique instance of every raid boss). */
   totalSpawnCount: number
+  laneKey: string
 }
 
 /** One unique entry per boss id — prefer alive/ready, else soonest spawn. */
@@ -438,15 +519,40 @@ function isTrainInProgress(
 /** Alert-poller active check — still based on 5-minute spawn clusters. */
 export function hasActiveRaidTrain(bosses: RaidBossEntry[], serverOffsetMs = 0): boolean {
   const nowMs = serverNowMs(serverOffsetMs)
-  for (const train of groupBossesIntoTrains(bosses, nowMs)) {
-    if (isTrainInProgress(train, serverOffsetMs, bosses)) return true
+  for (const lane of partitionTrainLanes(bosses)) {
+    for (const train of groupBossesIntoTrains(lane.bosses, nowMs)) {
+      if (isTrainInProgress(train, serverOffsetMs, lane.bosses)) return true
+    }
   }
   return false
 }
 
+function pickLaneDisplayTrain(
+  bosses: RaidBossEntry[],
+  laneKey: string,
+  serverOffsetMs: number,
+  nowMs: number,
+  horizonMs: number,
+): BossTimerVisibleTrain | null {
+  const roster = uniqueBossRoster(bosses, nowMs)
+  if (roster.length === 0) return null
+
+  if (isTrainInProgress(roster, serverOffsetMs, roster)) {
+    return { bosses: roster, totalSpawnCount: roster.length, laneKey }
+  }
+
+  const nonSlain = roster.filter((b) => !isBossSlain(b, serverOffsetMs, roster))
+  if (nonSlain.length === 0) return null
+
+  const leadMs = Math.min(...nonSlain.map((b) => bossTrainSpawnMs(b, nowMs))) - nowMs
+  if (leadMs > horizonMs) return null
+
+  return { bosses: roster, totalSpawnCount: roster.length, laneKey }
+}
+
 /**
- * One train = one unique instance of every raid boss (full cycle roster).
- * Active mid-cycle trains always show; otherwise show when a non-slain boss is within `horizonMs`.
+ * One train per lane: the 3h world-raid roster, plus solo bosses (Omegamon).
+ * DexDoruGreymon is ignored. A solo train disappears once that boss is slain.
  */
 export function pickDisplayBossTrains(
   bosses: RaidBossEntry[],
@@ -454,18 +560,16 @@ export function pickDisplayBossTrains(
   horizonMs = TRAIN_LOOKAHEAD_MS,
 ): BossTimerVisibleTrain[] {
   const nowMs = serverNowMs(serverOffsetMs)
-  const roster = uniqueBossRoster(bosses, nowMs)
-  if (roster.length === 0) return []
+  const visible: BossTimerVisibleTrain[] = []
 
-  if (isTrainInProgress(roster, serverOffsetMs, roster)) {
-    return [{ bosses: roster, totalSpawnCount: roster.length }]
+  for (const lane of partitionTrainLanes(bosses)) {
+    const train = pickLaneDisplayTrain(lane.bosses, lane.key, serverOffsetMs, nowMs, horizonMs)
+    if (train) visible.push(train)
   }
 
-  const nonSlain = roster.filter((b) => !isBossSlain(b, serverOffsetMs, roster))
-  if (nonSlain.length === 0) return []
-
-  const leadMs = Math.min(...nonSlain.map((b) => bossTrainSpawnMs(b, nowMs))) - nowMs
-  if (leadMs > horizonMs) return []
-
-  return [{ bosses: roster, totalSpawnCount: roster.length }]
+  return visible.sort((a, b) => {
+    const aLead = Math.min(...a.bosses.map((boss) => bossTrainSpawnMs(boss, nowMs)))
+    const bLead = Math.min(...b.bosses.map((boss) => bossTrainSpawnMs(boss, nowMs)))
+    return aLead - bLead
+  })
 }

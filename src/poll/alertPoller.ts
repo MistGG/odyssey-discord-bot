@@ -1,6 +1,7 @@
 import type { Client, TextChannel } from 'discord.js'
 import { BossAlertEngine, trainNotifyKey, type BossAlertCandidate } from '../lib/bossTimerAlerts.js'
 import {
+  bossesForTrainLane,
   fetchRaidTimer,
   groupAlertSnapshotsForNotify,
   hasActiveRaidTrain,
@@ -9,6 +10,7 @@ import {
   isBossSlain,
   bossTrainSpawnMs,
   nextSpawnUtcMs,
+  partitionTrainLanes,
   serverNowMs,
   toAlertSnapshots,
   TRAIN_WAVE_TAIL_MS,
@@ -74,10 +76,7 @@ export class AlertPoller {
   }
 
   private hasTrackedTrainAlert(): boolean {
-    for (const guildId of this.guildsToNotify()) {
-      if (this.trainAlerts.get(guildId)) return true
-    }
-    return false
+    return this.trainAlerts.hasAny()
   }
 
   private shouldPollRaidFast(bosses: RaidBossEntry[], serverOffsetMs: number): boolean {
@@ -91,18 +90,20 @@ export class AlertPoller {
   }
 
   private isWithinLeadWindow(bosses: RaidBossEntry[], leadMinutes: number[]): boolean {
-    const snapshots = toAlertSnapshots(bosses)
-    const trains = groupAlertSnapshotsForNotify(snapshots, Date.now())
-    if (trains.length === 0) return false
-
-    const train = trains[0]!
-    const respawning = train.filter((b) => b.status === 'respawning')
-    if (respawning.length === 0) return false
-
-    const anchorMs = Math.min(...respawning.map((b) => b.nextSpawnUtcMs))
     const maxLeadMs = Math.max(...leadMinutes, 5) * 60_000
-    const remaining = anchorMs - Date.now()
-    return remaining > 0 && remaining <= maxLeadMs + 60_000
+    for (const lane of partitionTrainLanes(bosses)) {
+      const trains = groupAlertSnapshotsForNotify(toAlertSnapshots(lane.bosses), Date.now())
+      if (trains.length === 0) continue
+
+      const train = trains[0]!
+      const respawning = train.filter((b) => b.status === 'respawning')
+      if (respawning.length === 0) continue
+
+      const anchorMs = Math.min(...respawning.map((b) => b.nextSpawnUtcMs))
+      const remaining = anchorMs - Date.now()
+      if (remaining > 0 && remaining <= maxLeadMs + 60_000) return true
+    }
+    return false
   }
 
   private async runRaidPollCycle(): Promise<void> {
@@ -121,11 +122,12 @@ export class AlertPoller {
     }
   }
 
-  private engineFor(guildId: string): BossAlertEngine {
-    let engine = this.engines.get(guildId)
+  private engineFor(guildId: string, laneKey: string): BossAlertEngine {
+    const key = `${guildId}:${laneKey}`
+    let engine = this.engines.get(key)
     if (!engine) {
       engine = new BossAlertEngine()
-      this.engines.set(guildId, engine)
+      this.engines.set(key, engine)
     }
     return engine
   }
@@ -156,14 +158,25 @@ export class AlertPoller {
     try {
       const data = await fetchRaidTimer()
       this.lastRaidData = { bosses: data.bosses, serverOffsetMs: data.serverOffsetMs }
-      const snapshots = toAlertSnapshots(data.bosses)
+      const lanes = partitionTrainLanes(data.bosses)
 
       for (const guildId of this.guildsToNotify()) {
-        const engine = this.engineFor(guildId)
-        engine.setSnapshots(snapshots)
-        await this.refreshTrainAlertMessage(guildId, engine, data.bosses, data.serverOffsetMs)
-        this.maybeFinishCycleWithoutMessage(guildId, engine, data.bosses, data.serverOffsetMs)
-        await this.notifyGuild(guildId, engine, data.bosses, data.serverOffsetMs)
+        const trackedKeys = new Set(this.trainAlerts.list(guildId).map((entry) => entry.laneKey))
+        for (const { laneKey } of this.trainAlerts.list(guildId)) {
+          const laneBosses = bossesForTrainLane(data.bosses, laneKey)
+          const engine = this.engineFor(guildId, laneKey)
+          engine.setSnapshots(toAlertSnapshots(laneBosses))
+          await this.refreshTrainAlertMessage(guildId, laneKey, engine, laneBosses, data.serverOffsetMs)
+        }
+
+        for (const lane of lanes) {
+          const engine = this.engineFor(guildId, lane.key)
+          engine.setSnapshots(toAlertSnapshots(lane.bosses))
+          if (!trackedKeys.has(lane.key)) {
+            this.maybeFinishCycleWithoutMessage(guildId, lane.key, engine, lane.bosses, data.serverOffsetMs)
+          }
+          await this.notifyGuild(guildId, lane.key, engine, lane.bosses, data.serverOffsetMs)
+        }
       }
     } catch (err) {
       console.error('[poll] raid timer fetch failed:', err)
@@ -286,11 +299,12 @@ export class AlertPoller {
 
   private maybeFinishCycleWithoutMessage(
     guildId: string,
+    laneKey: string,
     engine: BossAlertEngine,
     bosses: RaidBossEntry[],
     serverOffsetMs: number,
   ): void {
-    if (this.trainAlerts.get(guildId)) return
+    if (this.trainAlerts.get(guildId, laneKey)) return
 
     const anchorMs = engine.getCycleAnchorMs()
     if (anchorMs == null) return
@@ -306,35 +320,37 @@ export class AlertPoller {
 
   private async finishTrainAlert(
     guildId: string,
+    laneKey: string,
     engine: BossAlertEngine,
     channel: TextChannel,
     messageId: string,
   ): Promise<void> {
     await channel.messages.fetch(messageId).then((m) => m.delete()).catch(() => {})
-    this.trainAlerts.remove(guildId)
+    this.trainAlerts.remove(guildId, laneKey)
     engine.resetCycle()
   }
 
   private async refreshTrainAlertMessage(
     guildId: string,
+    laneKey: string,
     engine: BossAlertEngine,
     bosses: RaidBossEntry[],
     serverOffsetMs: number,
   ): Promise<void> {
-    const alert = this.trainAlerts.get(guildId)
+    const alert = this.trainAlerts.get(guildId, laneKey)
     if (!alert) return
 
     try {
       const channel = await this.resolveChannel(guildId, alert.channelId)
       if (!channel) {
-        this.trainAlerts.remove(guildId)
+        this.trainAlerts.remove(guildId, laneKey)
         return
       }
 
       const message = await channel.messages.fetch(alert.messageId).catch(() => null)
       if (!message) {
         // User deleted the message — do not re-ping this cycle; reset when the wave ends.
-        this.trainAlerts.remove(guildId)
+        this.trainAlerts.remove(guildId, laneKey)
         return
       }
 
@@ -344,26 +360,26 @@ export class AlertPoller {
         defeatedNames: [...progress.defeatedNames],
         seenAliveNames: [...progress.seenAliveNames],
       }
-      this.trainAlerts.update(guildId, {
+      this.trainAlerts.update(guildId, laneKey, {
         defeatedNames: updated.defeatedNames,
         seenAliveNames: updated.seenAliveNames,
       })
 
       if (this.isTrainCleared(updated)) {
-        await this.finishTrainAlert(guildId, engine, channel, alert.messageId)
+        await this.finishTrainAlert(guildId, laneKey, engine, channel, alert.messageId)
         return
       }
 
       const liveTrain = this.resolveLiveTrain(updated.rosterNames, bosses)
       if (liveTrain.length === 0) return
 
-        const candidate: BossAlertCandidate = {
-          train: liveTrain,
-          leadMin: updated.leadMin,
-          notifyKey: updated.notifyKey,
-          copy: updated.copy,
-          cycleAnchorMs: updated.cycleAnchorMs,
-        }
+      const candidate: BossAlertCandidate = {
+        train: liveTrain,
+        leadMin: updated.leadMin,
+        notifyKey: updated.notifyKey,
+        copy: updated.copy,
+        cycleAnchorMs: updated.cycleAnchorMs,
+      }
 
       await message.edit({
         content: null,
@@ -376,7 +392,7 @@ export class AlertPoller {
       })
     } catch (err) {
       if (isUnknownMessageError(err)) {
-        this.trainAlerts.remove(guildId)
+        this.trainAlerts.remove(guildId, laneKey)
       } else {
         console.error(`[poll] failed to refresh train alert ${alert.messageId}:`, err)
       }
@@ -385,13 +401,14 @@ export class AlertPoller {
 
   private async notifyGuild(
     guildId: string,
+    laneKey: string,
     engine: BossAlertEngine,
     bosses: RaidBossEntry[],
     serverOffsetMs: number,
   ): Promise<void> {
     const cfg = this.guildConfig.get(guildId)
     if (!cfg.alertChannelId) return
-    if (this.trainAlerts.get(guildId)) return
+    if (this.trainAlerts.get(guildId, laneKey)) return
 
     const channel = await this.resolveChannel(guildId, cfg.alertChannelId)
     if (!channel) return
@@ -402,7 +419,7 @@ export class AlertPoller {
       const candidates = engine.tick(cfg.leadMinutes)
       for (const candidate of candidates) {
         if (engine.hasNotified(candidate.leadMin, candidate.notifyKey)) continue
-        await this.sendTrainAlert(guildId, engine, channel, cfg, candidate, true)
+        await this.sendTrainAlert(guildId, laneKey, engine, channel, cfg, candidate, true)
       }
       return
     }
@@ -413,11 +430,12 @@ export class AlertPoller {
     const anchorMs = TrainAlertTracker.cycleAnchorMs(catchUp)
     const prePingKey = trainNotifyKey(anchorMs, leadMin)
     const withPing = !engine.hasNotified(leadMin, prePingKey)
-    await this.sendTrainAlert(guildId, engine, channel, cfg, catchUp, withPing, leadMin, prePingKey)
+    await this.sendTrainAlert(guildId, laneKey, engine, channel, cfg, catchUp, withPing, leadMin, prePingKey)
   }
 
   private async sendTrainAlert(
     guildId: string,
+    laneKey: string,
     engine: BossAlertEngine,
     channel: TextChannel,
     cfg: ReturnType<GuildConfigManager['get']>,
@@ -439,6 +457,7 @@ export class AlertPoller {
       }
       this.trainAlerts.track(
         guildId,
+        laneKey,
         TrainAlertTracker.fromCandidate(channel.id, sent.id, candidate),
       )
     } catch (err) {

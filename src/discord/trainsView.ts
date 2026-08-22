@@ -7,9 +7,11 @@ import {
   isBossAlive,
   isBossReady,
   isBossSlain,
+  MAIN_TRAIN_LANE_KEY,
   nextSpawnUtcMs,
   pickDisplayBossTrains,
   serverNowMs,
+  type BossTimerVisibleTrain,
   type RaidBossEntry,
   type RaidTimerResponse,
 } from '../lib/raidTimerApi.js'
@@ -36,15 +38,22 @@ function bossLine(boss: RaidBossEntry, serverOffsetMs: number, allBosses: RaidBo
   return `• **${boss.monster_name}** · ${map} · ${discordTimestamp(nextSpawnUtcMs(boss), 'R')}`
 }
 
-function orderedRoster(data: RaidTimerResponse, horizonMs?: number): RaidBossEntry[] {
-  const nowMs = serverNowMs(data.serverOffsetMs)
-  const trains = pickDisplayBossTrains(data.bosses, data.serverOffsetMs, horizonMs)
-  const roster = trains[0]?.bosses ?? []
-  return [...roster].sort((a, b) => bossTrainSpawnMs(a, nowMs) - bossTrainSpawnMs(b, nowMs))
+function trainHeading(train: BossTimerVisibleTrain, multiple: boolean): string {
+  if (train.laneKey !== MAIN_TRAIN_LANE_KEY) {
+    return `## ${train.bosses[0]?.monster_name ?? 'Solo train'}`
+  }
+  return multiple ? '## Raid train' : '## Next raid train'
 }
 
-function buildSnapshotText(data: RaidTimerResponse, bosses: RaidBossEntry[]): string {
+function trainSection(
+  data: RaidTimerResponse,
+  train: BossTimerVisibleTrain,
+  multiple: boolean,
+): string {
   const nowMs = serverNowMs(data.serverOffsetMs)
+  const bosses = [...train.bosses].sort(
+    (a, b) => bossTrainSpawnMs(a, nowMs) - bossTrainSpawnMs(b, nowMs),
+  )
   const lead = bosses[0]
   const leadLine = !lead
     ? null
@@ -60,16 +69,20 @@ function buildSnapshotText(data: RaidTimerResponse, bosses: RaidBossEntry[]): st
     data.live ? null : 'stale timer',
   ].filter(Boolean)
 
-  const lines = [
-    '## Next raid train',
+  return [
+    trainHeading(train, multiple),
     headerBits.join(' · '),
     '',
     ...bosses.map((boss) => bossLine(boss, data.serverOffsetMs, bosses)),
-    '',
-    '_Run /trains again to refresh_',
-  ]
+  ].join('\n')
+}
 
-  return lines.join('\n')
+function buildSnapshotText(data: RaidTimerResponse, trains: BossTimerVisibleTrain[]): string {
+  const multiple = trains.length > 1
+  return [
+    ...trains.map((train) => trainSection(data, train, multiple)),
+    '_Run /trains again to refresh_',
+  ].join('\n\n')
 }
 
 export type TrainsMessagePayload = {
@@ -85,10 +98,10 @@ export async function buildTrainsMessage(
   data: RaidTimerResponse,
   options?: TrainsMessageOptions,
 ): Promise<TrainsMessagePayload> {
-  const bosses = orderedRoster(data, options?.horizonMs)
+  const trains = pickDisplayBossTrains(data.bosses, data.serverOffsetMs, options?.horizonMs)
   const container = new ContainerBuilder().setAccentColor(COLOR_TRAIN)
 
-  if (bosses.length === 0) {
+  if (trains.length === 0) {
     const emptyText =
       data.bosses.length > 0
         ? '## Next raid train\nNo raid train in the current lookahead window.'
@@ -97,7 +110,7 @@ export async function buildTrainsMessage(
     return { components: [container], flags: TRAINS_MESSAGE_FLAGS }
   }
 
-  container.addTextDisplayComponents((text) => text.setContent(buildSnapshotText(data, bosses)))
+  container.addTextDisplayComponents((text) => text.setContent(buildSnapshotText(data, trains)))
   return { components: [container], flags: TRAINS_MESSAGE_FLAGS }
 }
 
