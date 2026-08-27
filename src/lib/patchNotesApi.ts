@@ -1,5 +1,5 @@
 import {
-  composePatchNoteBody,
+  composePatchNoteBlocks,
   docSlugFromUrl,
   latestReleaseFromShareTree,
   parseOutlineDocPage,
@@ -9,6 +9,7 @@ import {
   type PatchNoteEntry,
   type PatchNoteSection,
 } from './patchNotes.js'
+import { blocksToPlainText } from './releaseNotesText.js'
 
 export const PATCH_NOTES_SHARE_ID = '2bb157c9-224d-48ab-a6f2-697589ebe97a'
 
@@ -178,19 +179,20 @@ async function buildReleaseEntry(release: OutlineShareTreeNode): Promise<PatchNo
     })
   }
 
-  let bodyText = composePatchNoteBody(sections)
+  const bodyBlocks = composePatchNoteBlocks(sections)
+  const bodyText = blocksToPlainText(bodyBlocks)
 
   // Fallback for older flat docs / API gaps: scrape the HTML page.
   if (!bodyText) {
     try {
       const scraped = await fetchDocFull(url)
-      bodyText = scraped.bodyText || scraped.bodyHtml
       return {
         id,
         title: parentDoc.title || release.title || scraped.title,
         url,
         preview: '',
         bodyText: scraped.bodyText,
+        bodyBlocks: scraped.bodyBlocks,
         bodyHtml: scraped.bodyHtml,
       }
     } catch {
@@ -204,8 +206,38 @@ async function buildReleaseEntry(release: OutlineShareTreeNode): Promise<PatchNo
     url,
     preview: '',
     bodyText,
+    bodyBlocks,
     bodyHtml: '',
   }
+}
+
+export async function fetchPatchNoteImage(
+  url: string,
+  index: number,
+): Promise<{ buffer: Buffer; filename: string } | null> {
+  try {
+    const res = await fetchWithTimeout(url, {
+      headers: { Accept: 'image/*,*/*;q=0.8' },
+    })
+    if (!res.ok) return null
+    const ctype = (res.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase()
+    if (ctype && !ctype.startsWith('image/')) return null
+    const buf = Buffer.from(await res.arrayBuffer())
+    if (buf.length < 32 || buf.length > 8_000_000) return null
+    return { buffer: buf, filename: `patch-image-${index}.${imageExtension(ctype, buf)}` }
+  } catch {
+    return null
+  }
+}
+
+function imageExtension(contentType: string, buf: Buffer): string {
+  if (contentType.includes('jpeg') || contentType.includes('jpg')) return 'jpg'
+  if (contentType.includes('webp')) return 'webp'
+  if (contentType.includes('gif')) return 'gif'
+  if (contentType.includes('png')) return 'png'
+  if (buf[0] === 0xff && buf[1] === 0xd8) return 'jpg'
+  if (buf[0] === 0x89 && buf[1] === 0x50) return 'png'
+  return 'png'
 }
 
 export async function fetchLatestPatchNoteMeta(): Promise<{ id: string; url: string } | null> {

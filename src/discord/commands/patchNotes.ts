@@ -3,7 +3,7 @@ import {
   SlashCommandBuilder,
   type ChatInputCommandInteraction,
 } from 'discord.js'
-import { buildPatchNoteEmbeds } from '../patchNotesEmbed.js'
+import { sendPatchNoteMessages } from '../patchNotesEmbed.js'
 import type { GuildConfigManager } from '../../guildConfig.js'
 import { fetchLatestPatchNoteDetail } from '../../lib/patchNotesApi.js'
 
@@ -46,12 +46,9 @@ export async function handlePatchNotesCommand(
       return
     }
 
-    const embeds = buildPatchNoteEmbeds(note, { test: true })
-    for (const embed of embeds) {
-      await channel.send({ embeds: [embed] })
-    }
+    const messageCount = await sendPatchNoteMessages(channel, note, { test: true })
     const parts =
-      embeds.length > 1 ? ` (${embeds.length} messages)` : ''
+      messageCount > 1 ? ` (${messageCount} messages)` : ''
     await interaction.editReply({
       content: `Posted the latest patch note${parts} to <#${cfg.patchNotesChannelId}> (test preview; does not affect auto-post tracking).`,
     })

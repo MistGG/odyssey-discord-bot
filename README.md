@@ -40,15 +40,15 @@ When generating an OAuth2 URL, enable:
 - `bot`
 - `applications.commands`
 
-Suggested bot permissions: **Send Messages**, **Embed Links**, **Manage Messages** (optional, for future pinned live board).
+Suggested bot permissions: **Send Messages**, **Embed Links**, **Attach Files**, **Manage Messages** (optional, for future pinned live board).
 
 Example invite URL shape:
 
 ```
-https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=18432&scope=bot%20applications.commands
+https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=51200&scope=bot%20applications.commands
 ```
 
-(`18432` = Send Messages + Embed Links)
+(`51200` = Send Messages + Embed Links + Attach Files)
 
 ## Slash commands
 

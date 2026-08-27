@@ -1,4 +1,12 @@
-import { outlineMarkdownToDiscord, stripHtmlToPlainText } from './releaseNotesText.js'
+import {
+  blocksToPlainText,
+  htmlReleaseNotesToBlocks,
+  outlineMarkdownToBlocks,
+  stripHtmlToPlainText,
+  type DiscordContentBlock,
+} from './releaseNotesText.js'
+
+export type { DiscordContentBlock } from './releaseNotesText.js'
 
 export type PatchNoteEntry = {
   id: string
@@ -7,6 +15,8 @@ export type PatchNoteEntry = {
   preview: string
   /** Preferred Discord-ready body (from Outline document text + children). */
   bodyText: string
+  /** Structured body with images preserved for Discord attachments. */
+  bodyBlocks: DiscordContentBlock[]
   /** HTML scrape fallback when document text APIs are unavailable. */
   bodyHtml: string
 }
@@ -50,6 +60,7 @@ export function parseOutlineDocSummary(html: string, url: string): PatchNoteEntr
     url,
     preview: '',
     bodyText: '',
+    bodyBlocks: [],
     bodyHtml: '',
   }
 }
@@ -63,9 +74,10 @@ export function parseOutlineDocPage(html: string, url: string): PatchNoteEntry {
 
   const contentMatch = articleMatch[1].match(/<div id="content"[^>]*>([\s\S]*?)<\/div>/i)
   const bodyHtml = sanitizeOutlineContentHtml(contentMatch?.[1] ?? '')
-  const bodyText = stripHtmlToPlainText(bodyHtml)
+  const bodyBlocks = htmlReleaseNotesToBlocks(bodyHtml)
+  const bodyText = blocksToPlainText(bodyBlocks) || stripHtmlToPlainText(bodyHtml)
 
-  return { ...summary, bodyHtml, bodyText }
+  return { ...summary, bodyHtml, bodyText, bodyBlocks }
 }
 
 export function parsePatchNotesSitemap(xml: string): string[] {
@@ -86,26 +98,40 @@ export function latestReleaseFromShareTree(
   return releases[0] ?? null
 }
 
-export function composePatchNoteBody(sections: PatchNoteSection[]): string {
-  const parts: string[] = []
+export function composePatchNoteBlocks(sections: PatchNoteSection[]): DiscordContentBlock[] {
+  const blocks: DiscordContentBlock[] = []
 
   for (const section of sections) {
-    const text = outlineMarkdownToDiscord(section.text)
-    if (!text) continue
-
+    const converted = outlineMarkdownToBlocks(section.text)
     if (section.title) {
-      parts.push(`**${section.title.trim()}**\n\n${text}`)
-    } else {
-      parts.push(text)
+      const title = `**${section.title.trim()}**`
+      const first = converted[0]
+      if (first?.type === 'text') {
+        first.text = `${title}\n\n${first.text}`
+      } else {
+        blocks.push({ type: 'text', text: title })
+      }
     }
+    blocks.push(...converted)
   }
 
-  return parts.join('\n\n').trim()
+  return blocks
+}
+
+export function composePatchNoteBody(sections: PatchNoteSection[]): string {
+  return blocksToPlainText(composePatchNoteBlocks(sections))
 }
 
 export function patchNoteBody(note: PatchNoteEntry): string {
   if (note.bodyText.trim()) return note.bodyText.trim()
+  if (note.bodyBlocks?.length) return blocksToPlainText(note.bodyBlocks)
   return stripHtmlToPlainText(note.bodyHtml)
+}
+
+export function patchNoteBlocks(note: PatchNoteEntry): DiscordContentBlock[] {
+  if (note.bodyBlocks?.length) return note.bodyBlocks
+  const body = patchNoteBody(note)
+  return body ? outlineMarkdownToBlocks(body) : []
 }
 
 export function patchNoteDisplayParts(title: string): { date: string | null; label: string } {

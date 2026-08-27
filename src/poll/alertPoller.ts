@@ -23,7 +23,7 @@ import {
 import type { EnvConfig } from '../config.js'
 import type { GuildConfigManager } from '../guildConfig.js'
 import { buildTrainAlertEmbed, rolePingContent } from '../discord/embeds.js'
-import { buildPatchNoteEmbeds } from '../discord/patchNotesEmbed.js'
+import { sendPatchNoteMessages } from '../discord/patchNotesEmbed.js'
 import { TrainAlertTracker, type TrackedTrainAlert } from './trainAlertTracker.js'
 
 function isUnknownMessageError(err: unknown): boolean {
@@ -211,10 +211,7 @@ export class AlertPoller {
         if (!channel) continue
 
         try {
-          const embeds = buildPatchNoteEmbeds(note)
-          for (const embed of embeds) {
-            await channel.send({ embeds: [embed] })
-          }
+          await sendPatchNoteMessages(channel, note)
           this.guildConfig.setLastPostedPatchNoteId(guildId, latest.id)
         } catch (err) {
           console.error(`[poll] failed to post patch notes in guild ${guildId}:`, err)
