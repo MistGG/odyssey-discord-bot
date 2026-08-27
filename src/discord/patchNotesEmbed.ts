@@ -14,9 +14,9 @@ import {
 
 const EMBED_COLOR = 0x3ee0ff
 const MAX_DESCRIPTION = 4096
-const MAX_EMBEDS_PER_MESSAGE = 10
-const MAX_FILES_PER_MESSAGE = 10
-const MAX_EMBED_CHARS_PER_MESSAGE = 5900
+// Discord only renders the first embed when a message also has file attachments,
+// so each patch-note embed is sent as its own message.
+const MAX_EMBEDS_PER_MESSAGE = 1
 const FALLBACK_DESCRIPTION = 'Open the link below for full patch notes.'
 
 export type PatchNoteMessagePayload = {
@@ -54,27 +54,19 @@ export async function buildPatchNoteMessages(
     : 'Odyssey Calc · patch notes'
 
   const messages: PatchNoteMessagePayload[] = []
-  let current: PatchNoteMessagePayload & { chars: number } = { embeds: [], files: [], chars: 0 }
+  let current: PatchNoteMessagePayload = { embeds: [], files: [] }
 
   const flush = () => {
     if (current.embeds.length === 0) return
     messages.push({ embeds: current.embeds, files: current.files })
-    current = { embeds: [], files: [], chars: 0 }
+    current = { embeds: [], files: [] }
   }
 
   for (let index = 0; index < resolved.length; index++) {
     const spec = resolved[index]!
     const title = embedTitle(note, { index: index + 1, total })
     const footerText = total > 1 ? `${footer} · ${index + 1}/${total}` : footer
-    const chars = title.length + spec.description.length + footerText.length
-    const needsFile = spec.file != null
-
-    const wouldOverflow =
-      current.embeds.length >= MAX_EMBEDS_PER_MESSAGE ||
-      (needsFile && current.files.length >= MAX_FILES_PER_MESSAGE) ||
-      (current.embeds.length > 0 && current.chars + chars > MAX_EMBED_CHARS_PER_MESSAGE)
-
-    if (wouldOverflow) flush()
+    if (current.embeds.length >= MAX_EMBEDS_PER_MESSAGE) flush()
 
     const embed = new EmbedBuilder()
       .setColor(EMBED_COLOR)
@@ -90,7 +82,6 @@ export async function buildPatchNoteMessages(
     }
 
     current.embeds.push(embed)
-    current.chars += chars
   }
 
   flush()
