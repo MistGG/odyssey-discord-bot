@@ -60,6 +60,7 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=51
 | `/setup patch-notes-channel #channel` | Where new patch notes are posted |
 | `/setup show` | Show current guild settings |
 | `/trains` | On-demand snapshot of upcoming trains |
+| `/patch-notes latest` | Post the full latest patch notes in the current channel |
 | `/patch-notes test` | Preview the latest patch note in the configured channel |
 
 Guild settings are stored in `data/guild-config.json` (gitignored).

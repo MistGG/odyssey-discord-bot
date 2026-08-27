@@ -12,6 +12,9 @@ export const patchNotesCommand = new SlashCommandBuilder()
   .setDescription('Odyssey patch notes')
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
   .addSubcommand((sub) =>
+    sub.setName('latest').setDescription('Post the full latest patch notes in this channel'),
+  )
+  .addSubcommand((sub) =>
     sub.setName('test').setDescription('Post the most recent patch note to the configured channel'),
   )
 
@@ -25,6 +28,10 @@ export async function handlePatchNotesCommand(
   }
 
   const sub = interaction.options.getSubcommand()
+  if (sub === 'latest') {
+    await postLatestPatchNotes(interaction, { test: false })
+    return
+  }
   if (sub !== 'test') return
 
   const cfg = guildConfig.get(interaction.guildId)
@@ -36,24 +43,42 @@ export async function handlePatchNotesCommand(
     return
   }
 
+  await postLatestPatchNotes(interaction, {
+    test: true,
+    channelId: cfg.patchNotesChannelId,
+  })
+}
+
+async function postLatestPatchNotes(
+  interaction: ChatInputCommandInteraction,
+  options: { test: boolean; channelId?: string },
+): Promise<void> {
   await interaction.deferReply({ ephemeral: true })
 
   try {
-    const note = await fetchLatestPatchNoteDetail()
-    const channel = await interaction.client.channels.fetch(cfg.patchNotesChannelId)
+    const channel = options.channelId
+      ? await interaction.client.channels.fetch(options.channelId)
+      : (interaction.channel ??
+        (interaction.channelId ? await interaction.client.channels.fetch(interaction.channelId) : null))
     if (!channel?.isTextBased() || channel.isDMBased()) {
-      await interaction.editReply({ content: 'The configured patch notes channel is not reachable.' })
+      await interaction.editReply({
+        content: options.channelId
+          ? 'The configured patch notes channel is not reachable.'
+          : 'This command can only be used in a text channel.',
+      })
       return
     }
 
-    const messageCount = await sendPatchNoteMessages(channel, note, { test: true })
-    const parts =
-      messageCount > 1 ? ` (${messageCount} messages)` : ''
+    const note = await fetchLatestPatchNoteDetail()
+    const messageCount = await sendPatchNoteMessages(channel, note, { test: options.test })
+    const parts = messageCount > 1 ? ` (${messageCount} messages)` : ''
+    const where = options.channelId ? `to <#${options.channelId}>` : 'in this channel'
+    const suffix = options.test ? ' (test preview; does not affect auto-post tracking)' : ''
     await interaction.editReply({
-      content: `Posted the latest patch note${parts} to <#${cfg.patchNotesChannelId}> (test preview; does not affect auto-post tracking).`,
+      content: `Posted the latest patch note${parts} ${where}.${suffix}`,
     })
   } catch (err) {
-    console.error('[patch-notes] test failed:', err)
+    console.error(`[patch-notes] ${options.test ? 'test' : 'latest'} failed:`, err)
     await interaction.editReply({ content: 'Could not load patch notes right now. Try again in a moment.' })
   }
 }
